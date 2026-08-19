@@ -1,12 +1,31 @@
 let _firestoreDbCache = null;
-let _catalogMapCache = null;
+let _catalogMapCache = new Map();
+let _firestoreConfiguredCache = null;
 
 /**
- * Возвращает Firestore-клиент. Конфигурация и клиент создаются лениво и только
- * один раз за execution.
+ * Проверяет, настроен ли Firestore в текущем Apps Script-проекте.
+ * Firestore является ускоряющим кэшем, но больше не является обязательным
+ * условием для развертывания спецификации.
  */
+function isFirestoreConfigured_() {
+  if (_firestoreConfiguredCache !== null) return _firestoreConfiguredCache;
+
+  const props = PropertiesService.getScriptProperties();
+  _firestoreConfiguredCache = Boolean(
+    props.getProperty('client_email') &&
+    props.getProperty('private_key') &&
+    props.getProperty('project_id')
+  );
+  return _firestoreConfiguredCache;
+}
+
+/** Возвращает Firestore-клиент, если Firestore настроен. */
 function getFirestoreDb() {
   if (_firestoreDbCache) return _firestoreDbCache;
+  if (!isFirestoreConfigured_()) {
+    throw new Error('Firestore не настроен: отсутствуют Script Properties client_email/private_key/project_id.');
+  }
+
   const config = getFirestoreConfig_();
   _firestoreDbCache = FirestoreApp.getFirestore(
     config.clientEmail,
@@ -74,7 +93,7 @@ function handleDeployment(itemUUID, itemName, ss, baseSheet, rowFromDeploymentSh
 
 /**
  * Проверяет наличие того же UUID или дочерней ссылки на UUID за пределами
- * исходной строки. Для проверки читаются только D:F, а не весь диапазон «Базы».
+ * исходной строки. Читаются только D:F, а не весь диапазон «Базы».
  */
 function isSpecificationDeployed(baseSheet, itemUUID, excludeRow) {
   const lastRow = baseSheet.getLastRow();
@@ -83,15 +102,13 @@ function isSpecificationDeployed(baseSheet, itemUUID, excludeRow) {
   const width = COL_DESTINATION - COL_UUID + 1;
   const data = baseSheet.getRange(2, COL_UUID, lastRow - 1, width).getValues();
   const targetUuid = String(itemUUID).trim();
-  const uuidOffset = 0;
   const destinationOffset = COL_DESTINATION - COL_UUID;
 
   for (let i = 0; i < data.length; i++) {
     const currentRow = i + 2;
     if (currentRow === excludeRow) continue;
 
-    const rowUuid = String(data[i][uuidOffset] || '').trim();
-    if (rowUuid === targetUuid) {
+    if (String(data[i][0] || '').trim() === targetUuid) {
       return { isDeployed: true, targetRowOnBaseSheet: currentRow };
     }
 
@@ -104,8 +121,16 @@ function isSpecificationDeployed(baseSheet, itemUUID, excludeRow) {
   return { isDeployed: false, targetRowOnBaseSheet: null };
 }
 
-/** Получает спецификацию из Firestore, а при отсутствии загружает её из Sheets. */
+/**
+ * Получает спецификацию из Firestore. Если Firestore не настроен или временно
+ * недоступен, автоматически читает спецификацию непосредственно из Google Sheets.
+ */
 function getOrUploadProductSpecFromFirestore(itemName, ss) {
+  if (!isFirestoreConfigured_()) {
+    Logger.log(`Firestore не настроен. «${itemName}» будет прочитано напрямую из Google Sheets.`);
+    return getProductSpecDirectFromSheets_(itemName, ss);
+  }
+
   try {
     const queryResults = getFirestoreDb()
       .query(PRODUCTS_COLLECTION)
@@ -119,26 +144,102 @@ function getOrUploadProductSpecFromFirestore(itemName, ss) {
     }
 
     ss.toast(`Изделие «${itemName}» отсутствует в базе данных. Загружаю...`, 'Информация', 5);
-    const uploadedDocId = uploadSpecToFirestoreFromSheet(itemName);
-    if (!uploadedDocId) return null;
+    const uploadedDocId = uploadSpecToFirestoreFromSheet(itemName, ss);
+    if (uploadedDocId) {
+      const loadedDoc = getFirestoreDocument(PRODUCTS_COLLECTION, uploadedDocId);
+      if (loadedDoc && loadedDoc.obj) {
+        return { docId: uploadedDocId, data: loadedDoc.obj };
+      }
+    }
+  } catch (error) {
+    Logger.log(`Firestore недоступен для «${itemName}»: ${error.stack || error.message}`);
+  }
 
-    const loadedDoc = getFirestoreDocument(PRODUCTS_COLLECTION, uploadedDocId);
-    if (loadedDoc && loadedDoc.obj) {
-      ss.toast(`Изделие «${itemName}» загружено в базу данных.`, 'Информация', 5);
-      return { docId: uploadedDocId, data: loadedDoc.obj };
+  Logger.log(`Переход на прямое чтение спецификации «${itemName}» из Google Sheets.`);
+  return getProductSpecDirectFromSheets_(itemName, ss);
+}
+
+/**
+ * Возвращает один уровень спецификации непосредственно из таблицы КД.
+ * Вложенные уровни читаются лениво только тогда, когда они реально нужны.
+ */
+function loadOneLevelSpecFromSheets_(itemName, catalogMap) {
+  const normalizedName = String(itemName || '').trim();
+  if (!normalizedName) return null;
+
+  const link = catalogMap.get(normalizedName);
+  if (!link) {
+    Logger.log(`loadOneLevelSpecFromSheets_: для «${normalizedName}» нет ссылки в Каталоге ссылок.`);
+    return { name: normalizedName, specification: [] };
+  }
+
+  const sheetId = extractSheetId(link);
+  if (!sheetId) {
+    Logger.log(`loadOneLevelSpecFromSheets_: не удалось извлечь ID таблицы для «${normalizedName}».`);
+    return null;
+  }
+
+  try {
+    const sourceSs = SpreadsheetApp.openById(sheetId);
+    const sourceSheet = sourceSs.getSheetByName(normalizedName);
+    if (!sourceSheet) {
+      Logger.log(`loadOneLevelSpecFromSheets_: лист «${normalizedName}» не найден.`);
+      return null;
     }
 
-    return null;
+    const lastRow = sourceSheet.getLastRow();
+    if (lastRow < 5) return { name: normalizedName, specification: [] };
+
+    const rawData = sourceSheet.getRange(5, 2, lastRow - 4, 3).getValues();
+    const totalIndex = rawData.findIndex(row =>
+      String(row[0] || '').trim().toLowerCase() === 'итого'
+    );
+
+    if (totalIndex === -1) {
+      Logger.log(`loadOneLevelSpecFromSheets_: в «${normalizedName}» не найдена строка «Итого».`);
+      return { name: normalizedName, specification: [] };
+    }
+
+    const specification = [];
+    for (const row of rawData.slice(0, totalIndex)) {
+      const componentName = String(row[0] || '').trim();
+      const quantityPerParent = parseFloat(row[2]);
+      if (!componentName || isNaN(quantityPerParent)) continue;
+
+      specification.push({
+        componentName,
+        quantityPerParent,
+        componentDocId: null
+      });
+    }
+
+    return { name: normalizedName, specification };
   } catch (error) {
-    Logger.log(`getOrUploadProductSpecFromFirestore: ${error.stack || error.message}`);
-    ss.toast(`Ошибка при работе с Firestore для «${itemName}».`, 'Ошибка', 5);
+    Logger.log(`loadOneLevelSpecFromSheets_(«${normalizedName}»): ${error.stack || error.message}`);
     return null;
   }
 }
 
+/** Формирует объект того же формата, который раньше приходил из Firestore. */
+function getProductSpecDirectFromSheets_(itemName, ss) {
+  const catalogMap = getCatalogMap(ss);
+  if (catalogMap.size === 0) {
+    ss.toast('Не удалось прочитать «Каталог ссылок».', 'Ошибка', 5);
+    return null;
+  }
+
+  const data = loadOneLevelSpecFromSheets_(itemName, catalogMap);
+  if (!data) {
+    ss.toast(`Не удалось прочитать спецификацию «${itemName}».`, 'Ошибка', 5);
+    return null;
+  }
+
+  return { docId: null, data };
+}
+
 /** Ищет компонент в Firestore и при отсутствии создаёт его. */
 function findOrCreateComponentDocId(componentName, overwriteIfFound = false) {
-  if (!componentName) return null;
+  if (!componentName || !isFirestoreConfigured_()) return null;
 
   try {
     const docId = searchFirestoreDocument(PRODUCTS_COLLECTION, 'name', componentName);
@@ -166,59 +267,28 @@ function findOrCreateComponentDocId(componentName, overwriteIfFound = false) {
   }
 }
 
-/**
- * Рекурсивно читает спецификации из связанных Google Sheets и синхронизирует
- * иерархию компонентов с Firestore. catalogMap передаётся по рекурсии и не
- * перечитывается для каждого компонента.
- */
+/** Синхронизирует иерархию спецификаций с Firestore. */
 function processAndGetFirestoreComponentId(currentCompName, depth, catalogMap) {
-  if (depth > MAX_SPEC_DEPTH) return null;
+  if (depth > MAX_SPEC_DEPTH || !isFirestoreConfigured_()) return null;
 
   const componentDocId = findOrCreateComponentDocId(currentCompName);
   if (!componentDocId) return null;
 
-  const componentSpecLink = catalogMap.get(currentCompName);
-  if (!componentSpecLink) {
-    updateFirestoreDocument(PRODUCTS_COLLECTION, componentDocId, {
-      name: currentCompName,
-      lastSpecUpdated: new Date().toISOString()
-    }, true);
-    return componentDocId;
-  }
-
-  const sheetId = extractSheetId(componentSpecLink);
-  if (!sheetId) return componentDocId;
-
-  let sheet;
-  try {
-    const sheetDoc = SpreadsheetApp.openById(sheetId);
-    sheet = sheetDoc.getSheetByName(currentCompName);
-  } catch (error) {
-    Logger.log(`Не удалось открыть спецификацию «${currentCompName}»: ${error.message}`);
-    return componentDocId;
-  }
-
-  if (!sheet) return componentDocId;
-  const lastRow = sheet.getLastRow();
-  if (lastRow < 5) return componentDocId;
-
-  const rawData = sheet.getRange(5, 2, lastRow - 4, 3).getValues();
-  const totalIndex = rawData.findIndex(row =>
-    String(row[0] || '').trim().toLowerCase() === 'итого'
-  );
-  if (totalIndex === -1) return componentDocId;
+  const source = loadOneLevelSpecFromSheets_(currentCompName, catalogMap);
+  if (!source) return componentDocId;
 
   const spec = [];
-  for (const row of rawData.slice(0, totalIndex)) {
-    const name = String(row[0] || '').trim();
-    const qty = parseFloat(row[2]);
-    if (!name || isNaN(qty)) continue;
+  for (const component of source.specification) {
+    const childId = processAndGetFirestoreComponentId(
+      component.componentName,
+      depth + 1,
+      catalogMap
+    );
 
-    const childId = processAndGetFirestoreComponentId(name, depth + 1, catalogMap);
     if (childId) {
       spec.push({
-        componentName: name,
-        quantityPerParent: qty,
+        componentName: component.componentName,
+        quantityPerParent: component.quantityPerParent,
         componentDocId: childId
       });
     }
@@ -234,17 +304,28 @@ function processAndGetFirestoreComponentId(currentCompName, depth, catalogMap) {
 }
 
 /**
- * Возвращает карту «изделие → ссылка на спецификацию». Карта читается один раз
- * за execution и затем повторно используется всем деревом развертывания.
+ * Возвращает карту «изделие → ссылка на спецификацию».
+ * Для текущей таблицы сначала используется её собственный «Каталог ссылок»;
+ * при отсутствии листа остаётся совместимость со старой основной таблицей.
  */
-function getCatalogMap() {
-  if (_catalogMapCache) return _catalogMapCache;
+function getCatalogMap(ss) {
+  const cacheKey = ss ? ss.getId() : MAIN_CATALOG_SHEET_ID;
+  if (_catalogMapCache.has(cacheKey)) return _catalogMapCache.get(cacheKey);
 
   const catalogMap = new Map();
   try {
-    const ssCatalog = SpreadsheetApp.openById(MAIN_CATALOG_SHEET_ID);
-    const catalogSheet = ssCatalog.getSheetByName('Каталог ссылок');
-    if (!catalogSheet) return catalogMap;
+    let catalogSs = ss || SpreadsheetApp.openById(MAIN_CATALOG_SHEET_ID);
+    let catalogSheet = catalogSs.getSheetByName('Каталог ссылок');
+
+    if (!catalogSheet && (!ss || ss.getId() !== MAIN_CATALOG_SHEET_ID)) {
+      catalogSs = SpreadsheetApp.openById(MAIN_CATALOG_SHEET_ID);
+      catalogSheet = catalogSs.getSheetByName('Каталог ссылок');
+    }
+
+    if (!catalogSheet) {
+      _catalogMapCache.set(cacheKey, catalogMap);
+      return catalogMap;
+    }
 
     const lastRow = catalogSheet.getLastRow();
     if (lastRow >= 2) {
@@ -257,17 +338,17 @@ function getCatalogMap() {
       }
     }
   } catch (error) {
-    Logger.log(`getCatalogMap: ${error.message}`);
+    Logger.log(`getCatalogMap: ${error.stack || error.message}`);
   }
 
-  _catalogMapCache = catalogMap;
-  return _catalogMapCache;
+  _catalogMapCache.set(cacheKey, catalogMap);
+  return catalogMap;
 }
 
 /** Загружает полную иерархию спецификации изделия в Firestore. */
-function uploadSpecToFirestoreFromSheet(productName) {
-  if (!productName) return null;
-  const catalogMap = getCatalogMap();
+function uploadSpecToFirestoreFromSheet(productName, ss) {
+  if (!productName || !isFirestoreConfigured_()) return null;
+  const catalogMap = getCatalogMap(ss);
   if (catalogMap.size === 0) return null;
   return processAndGetFirestoreComponentId(productName, 1, catalogMap);
 }
@@ -308,8 +389,8 @@ function writeSpecToBaseSheetFromFirestore(mainItemId, mainItemName, firestoreSp
 }
 
 /**
- * Строит массив строк спецификации полностью в памяти. Справочники «Остатки»,
- * «Цена материалов» и «Каталог ссылок» загружаются один раз до рекурсии.
+ * Строит массив строк спецификации в памяти. Остатки и покупные материалы
+ * читаются один раз. Вложенные спецификации загружаются лениво.
  */
 function generateExpandedSpecificationRows(firestoreSpecData, initialQuantity, mainItemId, mainItemName, ss, totalColumnCount, startRowForFormulas, headerNote = '') {
   const rows = [];
@@ -317,7 +398,7 @@ function generateExpandedSpecificationRows(firestoreSpecData, initialQuantity, m
 
   const stockMap = buildStockMap_(ss);
   const purchasedSet = buildPurchasedSet_(ss);
-  const catalogMap = getCatalogMap();
+  const catalogMap = getCatalogMap(ss);
 
   const headerRow = createSpecRow(
     new Date(),
@@ -334,6 +415,34 @@ function generateExpandedSpecificationRows(firestoreSpecData, initialQuantity, m
   rows.push(headerRow);
   currentRowOffset++;
 
+  function getNestedSpec_(component, childName, depth, shouldExpand) {
+    if (!shouldExpand || depth >= MAX_SPEC_DEPTH) return [];
+
+    if (Array.isArray(component.specification)) {
+      return component.specification;
+    }
+
+    const childDocId = component.componentDocId;
+    if (childDocId && isFirestoreConfigured_()) {
+      try {
+        let childDoc = getFirestoreDocument(PRODUCTS_COLLECTION, childDocId);
+        if (!childDoc || !childDoc.obj || !Array.isArray(childDoc.obj.specification) ||
+            childDoc.obj.specification.length === 0) {
+          processAndGetFirestoreComponentId(childName, depth + 1, catalogMap);
+          childDoc = getFirestoreDocument(PRODUCTS_COLLECTION, childDocId);
+        }
+        if (childDoc && childDoc.obj && Array.isArray(childDoc.obj.specification)) {
+          return childDoc.obj.specification;
+        }
+      } catch (error) {
+        Logger.log(`Не удалось получить вложенную спецификацию «${childName}» из Firestore: ${error.message}`);
+      }
+    }
+
+    const direct = loadOneLevelSpecFromSheets_(childName, catalogMap);
+    return direct && Array.isArray(direct.specification) ? direct.specification : [];
+  }
+
   function buildSpecRowsRecursive(components, parentTotalQty, depth, parentUuid, parentName) {
     if (depth > MAX_SPEC_DEPTH || !Array.isArray(components) || components.length === 0) return;
 
@@ -342,23 +451,13 @@ function generateExpandedSpecificationRows(firestoreSpecData, initialQuantity, m
 
       const childName = String(component.componentName || '').trim();
       const quantityPerParent = parseFloat(component.quantityPerParent);
-      const childDocId = component.componentDocId;
-      if (!childName || isNaN(quantityPerParent) || !childDocId) continue;
+      if (!childName || isNaN(quantityPerParent)) continue;
 
       const totalQuantity = parentTotalQty * quantityPerParent;
       const deficit = calculateDeficit(childName, totalQuantity, ss, stockMap);
       const status = determinePurchasedAndCheckboxStatus(childName, deficit, ss, purchasedSet);
-
-      let childDoc = getFirestoreDocument(PRODUCTS_COLLECTION, childDocId);
-      if (!childDoc || !childDoc.obj || !Array.isArray(childDoc.obj.specification) ||
-          childDoc.obj.specification.length === 0) {
-        processAndGetFirestoreComponentId(childName, depth + 1, catalogMap);
-        childDoc = getFirestoreDocument(PRODUCTS_COLLECTION, childDocId);
-      }
-
-      const nestedSpec = childDoc && childDoc.obj && Array.isArray(childDoc.obj.specification)
-        ? childDoc.obj.specification
-        : [];
+      const shouldExpand = deficit > 0 && !status.isPurchased;
+      const nestedSpec = getNestedSpec_(component, childName, depth, shouldExpand);
 
       const newRow = createSpecRow(
         null,
@@ -375,7 +474,7 @@ function generateExpandedSpecificationRows(firestoreSpecData, initialQuantity, m
       rows.push(newRow);
       currentRowOffset++;
 
-      if (nestedSpec.length > 0 && deficit > 0 && !status.isPurchased) {
+      if (nestedSpec.length > 0 && shouldExpand) {
         buildSpecRowsRecursive(
           nestedSpec,
           totalQuantity,
