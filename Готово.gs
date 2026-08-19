@@ -1,95 +1,68 @@
 /**
- * Обрабатывает готовность изделия: отмечает в "База", закрывает Trello,
- * архивирует строку и дописывает в архив цену из внешней базы.
+ * Обрабатывает готовность изделия: ставит финальные отметки, закрывает Trello,
+ * переносит строку в архив и удаляет её из «Базы».
  */
 function handleReady(ss, sheet, range, row) {
-  const baseSheet    = ss.getSheetByName("База");
-  const archiveSs    = SpreadsheetApp.openById("1oPsmDHUGmN0ZmzYbEMp137Px_KsxDcZRx4PhceUp-3g");
-  const archiveSheet = archiveSs.getSheetByName("Архив");
-  const itemId       = String(sheet.getRange(row, COL_UUID).getValue()).trim();
-  const itemName     = String(sheet.getRange(row, 5).getValue()).trim();
-  
-  // 1) Находим строку в "База" по UUID
+  const baseSheet = ss.getSheetByName('База');
+  const archiveSs = SpreadsheetApp.openById('1oPsmDHUGmN0ZmzYbEMp137Px_KsxDcZRx4PhceUp-3g');
+  const archiveSheet = archiveSs.getSheetByName('Архив');
+  if (!archiveSheet) throw new Error('В архивном документе не найден лист «Архив».');
+
+  const roleData = sheet.getRange(row, COL_UUID, 1, COL_ITEMNAME - COL_UUID + 1).getValues()[0];
+  const itemId = String(roleData[0] || '').trim();
+  const itemName = String(roleData[COL_ITEMNAME - COL_UUID] || '').trim();
+
   const baseRow = findRowById(baseSheet, itemId);
   if (!baseRow) {
-    Logger.log(`❌ itemId "${itemId}" not found in sheet База`);
-    return;
+    Logger.log(`handleReady: UUID ${itemId} не найден в Базе.`);
+    return null;
   }
-  
-  // 2) Ставим галочку "выполнено" в БАЗА
-  checkboxOk(baseSheet.getRange(baseRow, COL_ACCEPTANCE));
-  checkboxOk(baseSheet.getRange(baseRow, COL_READY));
-  
-  
-  // 3) Читаем всю строку из БАЗА
-  const rowData  = baseSheet
-    .getRange(baseRow, 1, 1, COL_FACT_QTY)
-    .getValues();
-  const trelloId = rowData[0][COL_TRELLO_ID - 1];
-  Logger.log(`TrelloID = ${trelloId}`);
+
+  // X:Y — соседние финальные отметки; один вызов вместо двух setValue().
+  const now = new Date();
+  baseSheet.getRange(baseRow, COL_ACCEPTANCE, 1, COL_READY - COL_ACCEPTANCE + 1)
+    .setValues([[now, now]]);
+
+  const rowData = baseSheet.getRange(baseRow, 1, 1, COL_FACT_QTY).getValues()[0];
+  const trelloId = rowData[COL_TRELLO_ID - 1];
   closeTrelloCard(trelloId);
-  
-  // 4) Архивируем: дописываем строку сразу после последней
-  const archiveLastRow = archiveSheet.getLastRow();
+
+  const price = fetchPrice_(itemName);
+  const archiveRow = archiveSheet.getLastRow() + 1;
   archiveSheet
-    .getRange(archiveLastRow + 1, 1, 1, COL_FACT_QTY)
-    .setValues(rowData);
-  
-  // 5) Дописываем цену из внешней БД в колонку COL_FACT_QTY+1
-  fetchAndAppendPrice(itemName, archiveSheet, archiveLastRow, COL_FACT_QTY);
-  
-  // 6) Удаляем исходную строку из "База"
+    .getRange(archiveRow, 1, 1, COL_FACT_QTY + 1)
+    .setValues([[...rowData, price]]);
+
   baseSheet.deleteRow(baseRow);
-  Logger.log(`✅ Row ${baseRow} moved from "База" to "Архив"`);
-  
-  // 7) Сбрасываем чекбокс, если отметка ставилась не на листе "База"
-  if (sheet.getName() !== baseSheet.getName()) {
+
+  if (sheet.getSheetId() !== baseSheet.getSheetId()) {
     range.setValue(false);
   }
-  
+
   return itemId;
 }
 
-
 /**
- * Ищет в внешней таблице цену для изделия и дописывает её в заданый архивный лист.
- * Если изделие не найдено, записывает цену 0.
- *
- * @param {string} itemName          — название изделия для поиска
- * @param {Sheet}  archiveSheet      — лист "Архив", куда дописываем цену
- * @param {number} archiveLastRow    — строка, после которой добавлена сама запись
- * @param {number} COL_FACT_QTY      — число колонок данных (без цены)
+ * Ищет цену по названию server-side через TextFinder вместо загрузки всей БД A:C.
  */
-function fetchAndAppendPrice(itemName, archiveSheet, archiveLastRow, COL_FACT_QTY) {
-  const ss      = SpreadsheetApp.openById("1wR3wybH7UplH0ogrrELf1S27N9O5t5DS9lIkBHeagJ8");
-  const dbSheet = ss.getSheetByName("БД артикулы");
-  if (!dbSheet) {
-    throw new Error('Sheet "БД артикулы" not found');
-  }
-  
-  // Читаем A:C
+function fetchPrice_(itemName) {
+  const priceSs = SpreadsheetApp.openById('1wR3wybH7UplH0ogrrELf1S27N9O5t5DS9lIkBHeagJ8');
+  const dbSheet = priceSs.getSheetByName('БД артикулы');
+  if (!dbSheet) throw new Error('Лист «БД артикулы» не найден.');
+
   const lastRow = dbSheet.getLastRow();
-  const data    = dbSheet.getRange(1, 1, lastRow, 3).getValues();
-  
-  // Ищем совпадение по названию
-  let foundPrice = 0;
-  for (let i = 0; i < data.length; i++) {
-    if (String(data[i][0]).trim() === itemName) {
-      foundPrice = data[i][2];  // цена в колонке C
-      break;
-    }
-  }
-  if (foundPrice === 0) {
-    Logger.log(`⚠️ Item "${itemName}" not found, defaulting price to 0`);
-  } else {
-    Logger.log(`Price ${foundPrice} found for "${itemName}"`);
-  }
-  
-  // Записываем цену в следующую колонку после COL_FACT_QTY
-  archiveSheet
-    .getRange(archiveLastRow + 1, COL_FACT_QTY + 1)
-    .setValue(foundPrice);
+  if (lastRow < 1) return 0;
+
+  const match = dbSheet
+    .getRange(1, 1, lastRow, 1)
+    .createTextFinder(String(itemName || '').trim())
+    .matchEntireCell(true)
+    .findNext();
+
+  return match ? dbSheet.getRange(match.getRow(), 3).getValue() : 0;
 }
 
-
-
+/** Совместимая обёртка для старых ручных вызовов. */
+function fetchAndAppendPrice(itemName, archiveSheet, archiveLastRow, colFactQty) {
+  archiveSheet.getRange(archiveLastRow + 1, colFactQty + 1).setValue(fetchPrice_(itemName));
+}
