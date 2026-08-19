@@ -20,11 +20,13 @@ function handleStock(ss, sheet, range, row) {
   const cardId = createTrelloCard(itemName, qty, purpose);
 
   baseSheet.getRange(baseRow, COL_TRELLO_ID).setValue(cardId);
-  checkboxOk(baseSheet.getRange(baseRow, COL_STOCK));
 
+  // Сначала сбрасываем ручной чекбокс на QUERY-листе. После отметки в Базе
+  // строка может сменить статус и исчезнуть, сдвинув следующую строку вверх.
   if (sheet.getSheetId() !== baseSheet.getSheetId()) {
     range.setValue(false);
   }
 
+  checkboxOk(baseSheet.getRange(baseRow, COL_STOCK));
   return itemId;
 }
