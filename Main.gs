@@ -280,8 +280,11 @@ function handleDeploymentSheetEvent_(ss, sheet, range, row, col, val, isTrue) {
     const baseSheet = ss.getSheetByName('База');
 
     if (!baseSheet) throw new Error('Лист «База» не найден.');
-    handleDeployment(itemUUID, itemName, ss, baseSheet, row, initialQuantity);
+
+    // Чекбокс сбрасывается до изменения COL_DEPLOYMENT: после смены статуса строка
+    // может исчезнуть из QUERY и на её месте окажется следующее изделие.
     range.setValue(false);
+    handleDeployment(itemUUID, itemName, ss, baseSheet, row, initialQuantity);
     return;
   }
 
@@ -413,8 +416,9 @@ function handleNewSheetEdit(ss, sheet, row, col, val) {
     return null;
   }
 
-  checkboxOk(baseSheet.getRange(baseRow, baseColumn));
+  // Сначала сбрасываем ручной чекбокс QUERY-листа, затем меняем этап в Базе.
   sheet.getRange(row, COL_CHECKBOX).setValue(false);
+  checkboxOk(baseSheet.getRange(baseRow, baseColumn));
   return itemId;
 }
 
