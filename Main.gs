@@ -19,73 +19,84 @@ const EDIT_QUEUE_CFG = {
 };
 
 const _sheetToBaseColumnMaps = new Map();
+let _roleSheetConfigCache = null;
 
 /**
- * Конфигурация однотипных листов исполнителей. Это заменяет повторяющиеся ветки
- * switch и оставляет в mainEditLogic только действительно специальную логику.
+ * Возвращает конфигурацию однотипных листов исполнителей.
+ *
+ * Конфигурация создаётся лениво, а не на верхнем уровне файла. Это важно для
+ * Apps Script: порядок инициализации файлов проекта не гарантирован, поэтому
+ * верхнеуровневое обращение из Main.gs к const COL_* из Config.gs может дать
+ * ReferenceError ещё до запуска выбранной пользователем функции.
  */
-const ROLE_SHEET_CONFIG = Object.freeze({
-  'Проектирование': {
-    noteColumns: [COL_ITEMNAME, COL_NOTE, COL_QUANTITY],
-    completion: 'generic'
-  },
-  'Техконтроль': {
-    noteColumns: [COL_ITEMNAME, COL_NOTE, COL_QUANTITY],
-    completion: 'generic',
-    returnColumn: COL_DESIGN
-  },
-  'Технолог': {
-    noteColumns: [COL_ITEMNAME, COL_NOTE, COL_QUANTITY],
-    completion: 'generic',
-    returnColumn: COL_DEPLOYMENT
-  },
-  'Проверка технологии': {
-    noteColumns: [COL_NOTE],
-    completion: 'generic',
-    returnColumn: COL_TECHNOLOGIEST
-  },
-  'Диспетчер- комплектовщик': {
-    noteColumns: [COL_ITEMNAME, COL_NOTE, COL_QUANTITY],
-    completion: 'supply',
-    returnColumn: COL_TECHNOLOGY_CHECK
-  },
-  'Комплектация': {
-    noteColumns: [COL_ITEMNAME, COL_NOTE, COL_QUANTITY, COL_DESTINATION],
-    completion: 'picking',
-    returnColumn: COL_PICKER
-  },
-  'Склад': {
-    noteColumns: [COL_NOTE],
-    completion: 'stock',
-    returnColumn: COL_PICKING
-  },
-  'Склад производства': {
-    noteColumns: [COL_NOTE],
-    completion: 'productionStock',
-    returnColumn: COL_STOCK
-  },
-  'Производство': {
-    noteColumns: [COL_NOTE],
-    completion: 'production',
-    returnColumn: COL_PRODUCTION_STOCK
-  },
-  'ОТК': {
-    noteColumns: [COL_NOTE],
-    completion: 'generic',
-    returnColumn: COL_PRODUCTION
-  },
-  'Приемка': {
-    noteColumns: [COL_NOTE, COL_QUANTITY],
-    completion: 'acceptance',
-    returnColumn: COL_QUALITY_CHECK
-  },
-  'Готово': {
-    noteColumns: [COL_NOTE],
-    completion: 'ready',
-    returnColumn: COL_ACCEPTANCE,
-    fillNextStage: false
-  }
-});
+function getRoleSheetConfig_() {
+  if (_roleSheetConfigCache) return _roleSheetConfigCache;
+
+  _roleSheetConfigCache = Object.freeze({
+    'Проектирование': {
+      noteColumns: [COL_ITEMNAME, COL_NOTE, COL_QUANTITY],
+      completion: 'generic'
+    },
+    'Техконтроль': {
+      noteColumns: [COL_ITEMNAME, COL_NOTE, COL_QUANTITY],
+      completion: 'generic',
+      returnColumn: COL_DESIGN
+    },
+    'Технолог': {
+      noteColumns: [COL_ITEMNAME, COL_NOTE, COL_QUANTITY],
+      completion: 'generic',
+      returnColumn: COL_DEPLOYMENT
+    },
+    'Проверка технологии': {
+      noteColumns: [COL_NOTE],
+      completion: 'generic',
+      returnColumn: COL_TECHNOLOGIEST
+    },
+    'Диспетчер- комплектовщик': {
+      noteColumns: [COL_ITEMNAME, COL_NOTE, COL_QUANTITY],
+      completion: 'supply',
+      returnColumn: COL_TECHNOLOGY_CHECK
+    },
+    'Комплектация': {
+      noteColumns: [COL_ITEMNAME, COL_NOTE, COL_QUANTITY, COL_DESTINATION],
+      completion: 'picking',
+      returnColumn: COL_PICKER
+    },
+    'Склад': {
+      noteColumns: [COL_NOTE],
+      completion: 'stock',
+      returnColumn: COL_PICKING
+    },
+    'Склад производства': {
+      noteColumns: [COL_NOTE],
+      completion: 'productionStock',
+      returnColumn: COL_STOCK
+    },
+    'Производство': {
+      noteColumns: [COL_NOTE],
+      completion: 'production',
+      returnColumn: COL_PRODUCTION_STOCK
+    },
+    'ОТК': {
+      noteColumns: [COL_NOTE],
+      completion: 'generic',
+      returnColumn: COL_PRODUCTION
+    },
+    'Приемка': {
+      noteColumns: [COL_NOTE, COL_QUANTITY],
+      completion: 'acceptance',
+      returnColumn: COL_QUALITY_CHECK
+    },
+    'Готово': {
+      noteColumns: [COL_NOTE],
+      completion: 'ready',
+      returnColumn: COL_ACCEPTANCE,
+      fillNextStage: false
+    }
+  });
+
+  return _roleSheetConfigCache;
+}
 
 function onEditHandler(e) {
   if (!e || !e.range) {
@@ -282,7 +293,7 @@ function mainEditLogic(eventData) {
     return;
   }
 
-  const roleConfig = ROLE_SHEET_CONFIG[sheetName];
+  const roleConfig = getRoleSheetConfig_()[sheetName];
   if (roleConfig) {
     handleRoleSheetEdit_(ss, sheet, range, row, col, val, isTrue, roleConfig);
     return;
