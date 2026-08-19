@@ -46,7 +46,9 @@ function handleReady(ss, sheet, range, row) {
   const price = fetchPrice_(itemName);
   const archiveRow = archiveSheet.getLastRow() + 1;
   archiveSheet.getRange(archiveRow, 1, 1, archiveValues.length + 1).setValues([[...archiveValues, price]]);
-  baseSheet.deleteRow(baseRow);
+
+  // Не удаляем физическую строку: строка 2 содержит spill-якоря вычисляемых полей.
+  clearBaseRawRow_(baseSheet, baseRow);
   return itemId;
 }
 
