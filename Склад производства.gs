@@ -1,29 +1,30 @@
 function handleProductionStock(ss, sheet, range, row) {
-  
-  const baseSheet = ss.getSheetByName("База");
-  const itemId = sheet.getRange(row, 4).getValue().toString().trim();
-  const itemName = sheet.getRange(row, 5).getValue().toString().trim();
-   
-  Logger.log(`[${new Date().toLocaleString()}] Запуск обработки склада производства, строка ${row}, изделие: "${itemName}"`);
-  
- // Поиск строки в "База" по itemId
-  const baseRow = findRowById(baseSheet, itemId); 
+  const baseSheet = ss.getSheetByName('База');
+  const itemId = String(sheet.getRange(row, COL_UUID).getValue() || '').trim();
 
-  //Получаем идентификатор заказ из SalesDrive из столбца AB
+  let baseRow = findRowById(baseSheet, itemId);
+  if (!baseRow) {
+    Logger.log(`handleProductionStock: UUID ${itemId} не найден в Базе.`);
+    return null;
+  }
+
   const sdOrderId = baseSheet.getRange(baseRow, COL_SD_ORDER_ID).getValue();
- 
-  changeSdStatus(sdOrderId, 23)//меняем статус заказа в СД, 23 - статус Передано в производство
+  if (sdOrderId) changeSdStatus(sdOrderId, 23); // 23 — «Передано в производство»
 
+  // Сворачивание спецификации может удалять строки выше текущей, поэтому старый
+  // baseRow после этой операции использовать нельзя.
   handleUndeployment(ss, sheet, row);
+  baseRow = findRowById(baseSheet, itemId);
+  if (!baseRow) {
+    Logger.log(`handleProductionStock: корневая строка ${itemId} не найдена после сворачивания.`);
+    return null;
+  }
 
-  // Сбрасываем исходный чекбокс, если изменение произошло вне "База"
-  if (sheet != baseSheet){
+  checkboxOk(baseSheet.getRange(baseRow, COL_PRODUCTION_STOCK));
+
+  if (sheet.getSheetId() !== baseSheet.getSheetId()) {
     range.setValue(false);
   }
-  checkboxOk(baseSheet.getRange(baseRow, COL_PRODUCTION_STOCK)); //Ставим отметку о выполнении на листе База
+
   return itemId;
 }
-
-
-
-
