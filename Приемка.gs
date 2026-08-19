@@ -8,7 +8,7 @@ function handleAcceptance(ss, sheet, range, row) {
     return null;
   }
 
-  // D:M читаются одним запросом: UUID, название и фактическое количество (M).
+  // D:M читаются одним запросом: UUID и фактическое количество (M).
   const rowData = sheet.getRange(row, COL_UUID, 1, 13 - COL_UUID + 1).getValues()[0];
   const itemId = String(rowData[0] || '').trim();
   const factQty = rowData[13 - COL_UUID];
@@ -25,10 +25,12 @@ function handleAcceptance(ss, sheet, range, row) {
     return null;
   }
 
-  baseSheet.getRange(baseRow, COL_FACT_QTY).setValue(factQty);
-  checkboxOk(baseSheet.getRange(baseRow, COL_ACCEPTANCE));
-
+  // Сначала очищаем ручные поля QUERY-листа. После отметки COL_ACCEPTANCE строка
+  // переходит в «Готово» и может исчезнуть с текущего листа.
   range.setValue(false);
   sheet.getRange(row, 13).clearContent();
+
+  baseSheet.getRange(baseRow, COL_FACT_QTY).setValue(factQty);
+  checkboxOk(baseSheet.getRange(baseRow, COL_ACCEPTANCE));
   return itemId;
 }
