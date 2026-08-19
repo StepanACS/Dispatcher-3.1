@@ -13,7 +13,6 @@ function handleSupplyOrder(ss, sheet, range, row) {
     return null;
   }
 
-  // Одно чтение вместо четырёх отдельных getValue().
   const baseData = baseSheet
     .getRange(baseRow, COL_DESTINATION, 1, COL_MODE - COL_DESTINATION + 1)
     .getValues()[0];
@@ -37,7 +36,7 @@ function handleSupplyOrder(ss, sheet, range, row) {
 
 /** Добавляет строку заказа в документ снабжения. */
 function setSupplyOrder(name, qty, purpose) {
-  const supplySpreadsheet = SpreadsheetApp.openById('1j_5fbonKWN5O5F7EeHDRjanm5d-fhWR0K2m2SO_EvSc');
+  const supplySpreadsheet = SpreadsheetApp.openById(SUPPLY_SPREADSHEET_ID);
   const supplySheet = supplySpreadsheet.getSheetByName('Сводный');
   if (!supplySheet) throw new Error('В документе снабжения не найден лист «Сводный».');
 
@@ -56,10 +55,7 @@ function setSupplyOrder(name, qty, purpose) {
   supplySheet.getRange(newOrderRow, 1, 1, rowData.length).setValues([rowData]);
 }
 
-/**
- * Возвращает последнюю непустую строку в столбце без загрузки всего столбца
- * в память Apps Script.
- */
+/** Возвращает последнюю непустую строку в столбце без загрузки всего столбца. */
 function getLastRowNumber(sheet, column) {
   const maxRows = sheet.getMaxRows();
   if (maxRows < 1) return 0;
@@ -82,15 +78,12 @@ function getSpec(itemName, link) {
   const lastRow = specSheet.getLastRow();
   if (lastRow < firstDataRow) return [];
 
-  // B:D читаются один раз; отдельно искать «Итого» в B уже не требуется.
   const raw = specSheet.getRange(firstDataRow, 2, lastRow - firstDataRow + 1, 3).getValues();
   const totalIndex = raw.findIndex(row => String(row[0] || '').trim().toLowerCase() === 'итого');
   return totalIndex === -1 ? [] : raw.slice(0, totalIndex);
 }
 
-/**
- * Строит карту «название → SalesDrive ID» одним чтением листа SD ID.
- */
+/** Строит карту «название → SalesDrive ID» одним чтением листа SD ID. */
 function loadSdIdMap_(ss) {
   const result = new Map();
   const sdSheet = ss.getSheetByName('SD ID');
@@ -107,10 +100,7 @@ function loadSdIdMap_(ss) {
   return result;
 }
 
-/**
- * Совместимая функция одиночного поиска. Для циклов передавайте заранее
- * построенный sdIdMap, чтобы не перечитывать лист на каждой позиции.
- */
+/** Совместимый одиночный поиск; в циклах используется заранее построенный Map. */
 function getSdId(ss, name, sdIdMap) {
   const map = sdIdMap || loadSdIdMap_(ss);
   return map.get(String(name || '').trim()) || null;
