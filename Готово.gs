@@ -4,7 +4,7 @@
  */
 function handleReady(ss, sheet, range, row) {
   const baseSheet = ss.getSheetByName('База');
-  const archiveSs = SpreadsheetApp.openById('1oPsmDHUGmN0ZmzYbEMp137Px_KsxDcZRx4PhceUp-3g');
+  const archiveSs = SpreadsheetApp.openById(ARCHIVE_SPREADSHEET_ID);
   const archiveSheet = archiveSs.getSheetByName('Архив');
   if (!archiveSheet) throw new Error('В архивном документе не найден лист «Архив».');
 
@@ -18,14 +18,13 @@ function handleReady(ss, sheet, range, row) {
     return null;
   }
 
-  // X:Y — соседние финальные отметки; один вызов вместо двух setValue().
   const now = new Date();
-  baseSheet.getRange(baseRow, COL_ACCEPTANCE, 1, COL_READY - COL_ACCEPTANCE + 1)
+  baseSheet
+    .getRange(baseRow, COL_ACCEPTANCE, 1, COL_READY - COL_ACCEPTANCE + 1)
     .setValues([[now, now]]);
 
   const rowData = baseSheet.getRange(baseRow, 1, 1, COL_FACT_QTY).getValues()[0];
-  const trelloId = rowData[COL_TRELLO_ID - 1];
-  closeTrelloCard(trelloId);
+  closeTrelloCard(rowData[COL_TRELLO_ID - 1]);
 
   const price = fetchPrice_(itemName);
   const archiveRow = archiveSheet.getLastRow() + 1;
@@ -42,11 +41,9 @@ function handleReady(ss, sheet, range, row) {
   return itemId;
 }
 
-/**
- * Ищет цену по названию server-side через TextFinder вместо загрузки всей БД A:C.
- */
+/** Ищет цену server-side через TextFinder вместо загрузки всей БД A:C. */
 function fetchPrice_(itemName) {
-  const priceSs = SpreadsheetApp.openById('1wR3wybH7UplH0ogrrELf1S27N9O5t5DS9lIkBHeagJ8');
+  const priceSs = SpreadsheetApp.openById(PRICE_DB_SPREADSHEET_ID);
   const dbSheet = priceSs.getSheetByName('БД артикулы');
   if (!dbSheet) throw new Error('Лист «БД артикулы» не найден.');
 
@@ -56,6 +53,7 @@ function fetchPrice_(itemName) {
   const match = dbSheet
     .getRange(1, 1, lastRow, 1)
     .createTextFinder(String(itemName || '').trim())
+    .matchCase(true)
     .matchEntireCell(true)
     .findNext();
 
