@@ -18,6 +18,12 @@ function handleReady(ss, sheet, range, row) {
     return null;
   }
 
+  // Если запуск был с QUERY-листа «Готово», снимаем ручной чекбокс ДО удаления
+  // строки из Базы. После удаления по тем же координатам уже будет другое изделие.
+  if (sheet.getSheetId() !== baseSheet.getSheetId()) {
+    range.setValue(false);
+  }
+
   const now = new Date();
   baseSheet
     .getRange(baseRow, COL_ACCEPTANCE, 1, COL_READY - COL_ACCEPTANCE + 1)
@@ -33,11 +39,6 @@ function handleReady(ss, sheet, range, row) {
     .setValues([[...rowData, price]]);
 
   baseSheet.deleteRow(baseRow);
-
-  if (sheet.getSheetId() !== baseSheet.getSheetId()) {
-    range.setValue(false);
-  }
-
   return itemId;
 }
 
