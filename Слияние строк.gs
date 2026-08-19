@@ -1,76 +1,62 @@
 /**
- * Объединяет подходящие дубли в «База».
- *
- * Для определения дублей нужны только столбцы E:V. Раньше функция дважды
- * загружала все 40 столбцов (values + formulas), а затем перезаписывала целые
- * строки. Теперь изменяются только F (назначение) и H (количество).
+ * Объединяет подходящие дубли в «База» по семантическим полям.
+ * Физические строки не удаляются: дубли очищаются, чтобы не сдвигать spill-якоря.
  */
 function checkAndMergeDuplicates(baseSheet, columnCount) {
   if (!baseSheet) return;
-
+  const ss = baseSheet.getParent();
   const startRow = 2;
-  const lastRow = baseSheet.getLastRow();
+  const lastRow = baseLastDataRow_(baseSheet);
   if (lastRow < startRow) return;
 
-  const firstCol = COL_ITEMNAME;
-  const lastCol = COL_PRODUCTION;
-  const data = baseSheet
-    .getRange(startRow, firstCol, lastRow - startRow + 1, lastCol - firstCol + 1)
-    .getValues();
+  const keys = ['item_name', 'destination', 'quantity', 'stage_picker', 'stage_production'];
+  const columns = keys.map(key => ({ key, col: baseCol_(ss, key) }));
+  const minCol = Math.min(...columns.map(x => x.col));
+  const maxCol = Math.max(...columns.map(x => x.col));
+  const data = baseSheet.getRange(startRow, minCol, lastRow - startRow + 1, maxCol - minCol + 1).getValues();
+  const idx = key => columns.find(x => x.key === key).col - minCol;
 
-  const offset = col => col - firstCol;
   const uniqueItems = new Map();
-  const rowsToDelete = [];
+  const rowsToClear = [];
 
   for (let i = 0; i < data.length; i++) {
     const row = data[i];
-    const productionMarker = row[offset(COL_PRODUCTION)];
-    if (productionMarker !== false && productionMarker !== null && productionMarker !== '') {
-      continue;
-    }
+    const itemName = String(row[idx('item_name')] || '').trim();
+    if (!itemName) continue;
 
-    const itemName = row[offset(COL_ITEMNAME)];
-    const destination = row[offset(COL_DESTINATION)];
-    const quantity = row[offset(COL_QUANTITY)];
-    const pickerMarker = row[offset(COL_PICKER)];
+    const productionMarker = row[idx('stage_production')];
+    const pickerMarker = row[idx('stage_picker')];
+    const destination = String(row[idx('destination')] || '').trim();
+    if ((productionMarker !== false && productionMarker !== null && productionMarker !== '') ||
+        pickerMarker !== false || !destination) continue;
 
-    if (!itemName || pickerMarker !== false || !destination) continue;
+    const quantityRaw = row[idx('quantity')];
+    const quantity = typeof quantityRaw === 'number' ? quantityRaw : parseFloat(quantityRaw) || 0;
+    const sheetRow = i + startRow;
 
     if (!uniqueItems.has(itemName)) {
-      uniqueItems.set(itemName, {
-        rowIndex: i,
-        destination: String(destination || ''),
-        quantity: typeof quantity === 'number' ? quantity : parseFloat(quantity) || 0,
-        changed: false
-      });
+      uniqueItems.set(itemName, { sheetRow, destination, quantity, changed: false });
       continue;
     }
 
     const target = uniqueItems.get(itemName);
-    const currentDestination = String(destination || '');
-    if (currentDestination && !target.destination.includes(currentDestination)) {
-      target.destination = target.destination
-        ? target.destination + '\n' + currentDestination
-        : currentDestination;
+    if (destination && !target.destination.split('\n').includes(destination)) {
+      target.destination = target.destination ? `${target.destination}\n${destination}` : destination;
       target.changed = true;
     }
-
-    const currentQty = typeof quantity === 'number' ? quantity : parseFloat(quantity) || 0;
-    if (currentQty !== 0) {
-      target.quantity += currentQty;
+    if (quantity !== 0) {
+      target.quantity += quantity;
       target.changed = true;
     }
-
-    rowsToDelete.push(i + startRow);
+    rowsToClear.push(sheetRow);
   }
 
-  // Записываем только реально изменившиеся ячейки, не затрагивая формулы остальных столбцов.
   for (const entry of uniqueItems.values()) {
     if (!entry.changed) continue;
-    const sheetRow = entry.rowIndex + startRow;
-    baseSheet.getRange(sheetRow, COL_DESTINATION).setValue(entry.destination);
-    baseSheet.getRange(sheetRow, COL_QUANTITY).setValue(entry.quantity);
+    writeBaseFields_(baseSheet, entry.sheetRow, {
+      destination: entry.destination,
+      quantity: entry.quantity
+    });
   }
-
-  deleteRowsInBlocks_(baseSheet, rowsToDelete);
+  clearBaseRawRows_(baseSheet, rowsToClear);
 }
