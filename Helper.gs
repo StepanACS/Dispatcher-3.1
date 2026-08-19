@@ -184,6 +184,13 @@ function createSpecRow(date, name, fullQty, parentName, futureIndex, parentUUIDF
     const cleanedParentName = String(parentName).replace(/<[^>]*>/g, '');
     const cleanedParentUUID = String(parentUUIDForDestination).replace(/<[^>]*>/g, '');
     row.destination = `${cleanedParentName} = ${fullQty} (${cleanedParentUUID})`;
+    attachSpecRelation_(row, {
+      childUuid: row.uuid,
+      parentUuid: cleanedParentUUID,
+      childName: name,
+      parentName: cleanedParentName,
+      quantity: fullQty
+    });
   } else {
     row.destination = '';
   }
