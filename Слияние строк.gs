@@ -1,6 +1,7 @@
 /**
  * Объединяет подходящие дубли в «База» по семантическим полям.
  * Физические строки не удаляются: дубли очищаются, чтобы не сдвигать spill-якоря.
+ * Все relation-рёбра UUID дубля переносятся на UUID строки-победителя.
  */
 function checkAndMergeDuplicates(baseSheet, columnCount) {
   if (!baseSheet) return;
@@ -9,7 +10,7 @@ function checkAndMergeDuplicates(baseSheet, columnCount) {
   const lastRow = baseLastDataRow_(baseSheet);
   if (lastRow < startRow) return;
 
-  const keys = ['item_name', 'destination', 'quantity', 'stage_picker', 'stage_production'];
+  const keys = ['uuid', 'item_name', 'destination', 'quantity', 'stage_picker', 'stage_production'];
   const columns = keys.map(key => ({ key, col: baseCol_(ss, key) }));
   const minCol = Math.min(...columns.map(x => x.col));
   const maxCol = Math.max(...columns.map(x => x.col));
@@ -18,11 +19,13 @@ function checkAndMergeDuplicates(baseSheet, columnCount) {
 
   const uniqueItems = new Map();
   const rowsToClear = [];
+  const uuidRemaps = [];
 
   for (let i = 0; i < data.length; i++) {
     const row = data[i];
+    const uuid = String(row[idx('uuid')] || '').trim();
     const itemName = String(row[idx('item_name')] || '').trim();
-    if (!itemName) continue;
+    if (!uuid || !itemName) continue;
 
     const productionMarker = row[idx('stage_production')];
     const pickerMarker = row[idx('stage_picker')];
@@ -35,7 +38,7 @@ function checkAndMergeDuplicates(baseSheet, columnCount) {
     const sheetRow = i + startRow;
 
     if (!uniqueItems.has(itemName)) {
-      uniqueItems.set(itemName, { sheetRow, destination, quantity, changed: false });
+      uniqueItems.set(itemName, { sheetRow, uuid, destination, quantity, changed: false });
       continue;
     }
 
@@ -48,8 +51,11 @@ function checkAndMergeDuplicates(baseSheet, columnCount) {
       target.quantity += quantity;
       target.changed = true;
     }
+    uuidRemaps.push({ fromUuid: uuid, toUuid: target.uuid });
     rowsToClear.push(sheetRow);
   }
+
+  for (const remap of uuidRemaps) remapSpecRelationUuid_(ss, remap.fromUuid, remap.toUuid);
 
   for (const entry of uniqueItems.values()) {
     if (!entry.changed) continue;
