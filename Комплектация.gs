@@ -1,71 +1,58 @@
 function handlePickingOrder(ss, sheet, range, row) {
-  var baseSheet = ss.getSheetByName("База");
+  const baseSheet = ss.getSheetByName('База');
+  const roleData = sheet.getRange(row, COL_UUID, 1, COL_ITEMNAME - COL_UUID + 1).getValues()[0];
+  const itemId = String(roleData[0] || '').trim();
+  const itemName = String(roleData[COL_ITEMNAME - COL_UUID] || '').trim();
 
-  // Читаем всю строку, где сработало событие, одним вызовом
-  var rowData = sheet.getRange(row, 1, 1, sheet.getLastColumn()).getValues()[0];
-  // Если константы определены с 1-индексацией, корректируем индексы:
-  var itemId = rowData[COL_UUID - 1].toString().trim();
-  var itemName = rowData[COL_ITEMNAME - 1].toString().trim();
-
-  // Находим строку в "База" по itemId
-  var baseRow = findRowById(baseSheet, itemId);
+  const baseRow = findRowById(baseSheet, itemId);
   if (!baseRow) {
-    Logger.log("Строка с itemId " + itemId + " не найдена в 'База'.");
-    return;
+    Logger.log(`handlePickingOrder: UUID ${itemId} не найден в Базе.`);
+    return null;
   }
-  
-  // Считываем всю строку из листа "База", чтобы получить все необходимые данные за один раз
-  var baseRowData = baseSheet.getRange(baseRow, 1, 1, baseSheet.getLastColumn()).getValues()[0];
-  var link = baseRowData[COL_LINK - 1].toString().trim();
-  var qty = baseRowData[COL_QUANTITY - 1];
-  var deficit = baseRowData[COL_DEFICIT - 1];
-  var supplyWay = baseRowData[COL_MODE - 1];
 
-  // Если есть дефицит и способ поставки "В производство", создаем заказ в SD
-  if (deficit > 0 && supplyWay === "В производство") {
-    var orderId = setSdOrder(ss, itemName, link, qty);
+  // Все необходимые значения из Базы читаются одним запросом.
+  const baseData = baseSheet
+    .getRange(baseRow, COL_LINK, 1, COL_MODE - COL_LINK + 1)
+    .getValues()[0];
+
+  const link = String(baseData[0] || '').trim();
+  const qty = baseData[COL_QUANTITY - COL_LINK];
+  const deficit = baseData[COL_DEFICIT - COL_LINK];
+  const supplyWay = baseData[COL_MODE - COL_LINK];
+
+  if (deficit > 0 && supplyWay === 'В производство') {
+    const orderId = setSdOrder(ss, itemName, link, qty);
     baseSheet.getRange(baseRow, COL_SD_ORDER_ID).setValue(orderId);
   }
 
-  // Если изменение произошло не на листе "База", сбрасываем исходный чекбокс
-  if (sheet.getName() !== baseSheet.getName()){
+  if (sheet.getSheetId() !== baseSheet.getSheetId()) {
     range.setValue(false);
   }
-  
-  // Ставим отметку о выполнении в столбце COL_PICKING на листе "База"
+
   checkboxOk(baseSheet.getRange(baseRow, COL_PICKING));
   return itemId;
 }
 
-function setSdOrder(ss, itemName, link, itemQty) { 
-  var comment = itemName + " = " + itemQty;
-  var products = [];
+function setSdOrder(ss, itemName, link, itemQty) {
+  const comment = `${itemName} = ${itemQty}`;
+  const spec = getSpec(itemName, link);
+  const sdIdMap = loadSdIdMap_(ss); // один раз на весь заказ
+  const products = [];
 
-  var spec = getSpec(itemName, link);
-  Logger.log(`Содержимое спецификации для "${itemName}".`);
-  Logger.log(spec);
-  for(var i = 0; i < spec.length; i++){
-    var sdId = getSdId(ss, spec[i][0]); //определяем идентификатор для СД по имени
-    var name = spec[i][0];
-    var qty = spec[i][2];
-    var amount = qty * itemQty;
-    
-    // Создаем массив товаров для отправки в СД
-    var product = {
-      "id": sdId,
-      "name": name,
-      "costPerItem": "",
-      "amount": amount,
-      "discount": "",
-      "sku": name
-    };
-    products.push(product);
+  for (const row of spec) {
+    const name = String(row[0] || '').trim();
+    const qty = parseFloat(row[2]);
+    if (!name || isNaN(qty)) continue;
+
+    products.push({
+      id: getSdId(ss, name, sdIdMap),
+      name,
+      costPerItem: '',
+      amount: qty * itemQty,
+      discount: '',
+      sku: name
+    });
   }
 
-Logger.log(`Массив товаров для записи в СД, "${itemName}".`);
-Logger.log(products);
-
-  // Отправляем запрос на добавление заявки в СД
-  var orderId = sendPostRequest(products, comment);
-  return orderId;
-} 
+  return sendPostRequest(products, comment);
+}
