@@ -11,8 +11,13 @@ function handleProductionStock(ss, sheet, range, row) {
   const sdOrderId = baseSheet.getRange(baseRow, COL_SD_ORDER_ID).getValue();
   if (sdOrderId) changeSdStatus(sdOrderId, 23); // 23 — «Передано в производство»
 
-  // Сворачивание спецификации может удалять строки выше текущей, поэтому старый
-  // baseRow после этой операции использовать нельзя.
+  // Сбрасываем чекбокс на QUERY-листе до любых изменений статуса в Базе.
+  if (sheet.getSheetId() !== baseSheet.getSheetId()) {
+    range.setValue(false);
+  }
+
+  // Сворачивание спецификации может удалить строки выше текущей, поэтому после
+  // операции номер строки корневого изделия определяем заново по UUID.
   handleUndeployment(ss, sheet, row);
   baseRow = findRowById(baseSheet, itemId);
   if (!baseRow) {
@@ -21,10 +26,5 @@ function handleProductionStock(ss, sheet, range, row) {
   }
 
   checkboxOk(baseSheet.getRange(baseRow, COL_PRODUCTION_STOCK));
-
-  if (sheet.getSheetId() !== baseSheet.getSheetId()) {
-    range.setValue(false);
-  }
-
   return itemId;
 }
