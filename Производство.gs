@@ -8,15 +8,16 @@ function handleProduction(ss, sheet, range, row) {
     return null;
   }
 
-  // Две соседние отметки записываем одним вызовом Sheets API.
+  // Сначала сбрасываем ручной чекбокс на QUERY-листе, затем меняем статус.
+  if (sheet.getSheetId() !== baseSheet.getSheetId()) {
+    range.setValue(false);
+  }
+
+  // Производство и ОТК отмечаются одним пакетным вызовом.
   const now = new Date();
   baseSheet
     .getRange(baseRow, COL_PRODUCTION, 1, COL_QUALITY_CHECK - COL_PRODUCTION + 1)
     .setValues([[now, now]]);
-
-  if (sheet.getSheetId() !== baseSheet.getSheetId()) {
-    range.setValue(false);
-  }
 
   return itemId;
 }
