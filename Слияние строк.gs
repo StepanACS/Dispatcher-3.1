@@ -1,117 +1,76 @@
 /**
- * Проверяет и объединяет дублирующиеся строки в листе "База"
- * согласно определенным условиям и правилам слияния, сохраняя форматирование.
- * Строки обрабатываются до столбца columnCount.
- * Строки с любой отметкой (кроме булевого false) в столбце U (COL_PRODUCTION) исключаются из обработки.
+ * Объединяет подходящие дубли в «База».
  *
- * @param {GoogleAppsScript.Spreadsheet.Sheet} baseSheet - Объект листа "База".
- * @param {number} columnCount - Общее количество столбцов для обработки (фактически getLastColumn()).
+ * Для определения дублей нужны только столбцы E:V. Раньше функция дважды
+ * загружала все 40 столбцов (values + formulas), а затем перезаписывала целые
+ * строки. Теперь изменяются только F (назначение) и H (количество).
  */
 function checkAndMergeDuplicates(baseSheet, columnCount) {
-    Logger.log("--- Начало checkAndMergeDuplicates ---");
-    const sheet = baseSheet; // Используем переданный лист
+  if (!baseSheet) return;
 
-    if (!sheet) {
-        Logger.log("Лист 'База' не найден. (Проблема с передачей параметра baseSheet)");
-        return;
+  const startRow = 2;
+  const lastRow = baseSheet.getLastRow();
+  if (lastRow < startRow) return;
+
+  const firstCol = COL_ITEMNAME;
+  const lastCol = COL_PRODUCTION;
+  const data = baseSheet
+    .getRange(startRow, firstCol, lastRow - startRow + 1, lastCol - firstCol + 1)
+    .getValues();
+
+  const offset = col => col - firstCol;
+  const uniqueItems = new Map();
+  const rowsToDelete = [];
+
+  for (let i = 0; i < data.length; i++) {
+    const row = data[i];
+    const productionMarker = row[offset(COL_PRODUCTION)];
+    if (productionMarker !== false && productionMarker !== null && productionMarker !== '') {
+      continue;
     }
 
-    const startRow = 2; // Предполагаем, что первая строка — заголовки
-    let effectiveLastRow = sheet.getLastRow();
-    const LAST_COLUMN_TO_PROCESS = columnCount; // Используем переданный columnCount
+    const itemName = row[offset(COL_ITEMNAME)];
+    const destination = row[offset(COL_DESTINATION)];
+    const quantity = row[offset(COL_QUANTITY)];
+    const pickerMarker = row[offset(COL_PICKER)];
 
-    if (effectiveLastRow < startRow) {
-        Logger.log("На листе 'База' нет данных для обработки (только заголовки или пусто).");
-        Logger.log("--- Завершено checkAndMergeDuplicates (нет данных) ---");
-        return;
+    if (!itemName || pickerMarker !== false || !destination) continue;
+
+    if (!uniqueItems.has(itemName)) {
+      uniqueItems.set(itemName, {
+        rowIndex: i,
+        destination: String(destination || ''),
+        quantity: typeof quantity === 'number' ? quantity : parseFloat(quantity) || 0,
+        changed: false
+      });
+      continue;
     }
 
-    const dataRange = sheet.getRange(startRow, 1, effectiveLastRow - startRow + 1, LAST_COLUMN_TO_PROCESS);
-    const values = dataRange.getValues();
-    const formulas = dataRange.getFormulas();
-
-    const uniqueItemsMap = new Map();
-    const rowsToDelete = [];
-
-    for (let i = 0; i < values.length; i++) {
-        const currentRowValues = values[i];
-        const currentRowFormulas = formulas[i];
-
-        const productionMarker = currentRowValues[COL_PRODUCTION - 1];
-
-        if (productionMarker !== false && productionMarker !== null && productionMarker !== "") {
-            Logger.log(`Строка ${i + startRow} пропущена: обнаружена отметка в столбце "${COL_PRODUCTION}" (Отметка о выполнении задач производства).`);
-            continue;
-        }
-
-        const itemName = currentRowValues[COL_ITEMNAME - 1];
-        const destination = currentRowValues[COL_DESTINATION - 1];
-        const quantity = currentRowValues[COL_QUANTITY - 1];
-        const checkboxQ = currentRowValues[COL_PICKER - 1];
-
-        if (itemName && checkboxQ === false && destination) {
-            if (uniqueItemsMap.has(itemName)) {
-                const existingEntry = uniqueItemsMap.get(itemName);
-                const firstRowIndexInValues = existingEntry.firstRowIndexInValues;
-
-                Logger.log(`Обнаружен дубликат для "${itemName}" (строка ${i + startRow}). Объединяем со строкой ${firstRowIndexInValues + startRow}.`);
-
-                let existingDestination = values[firstRowIndexInValues][COL_DESTINATION - 1];
-                if (typeof existingDestination !== 'string') existingDestination = String(existingDestination || '');
-                if (!existingDestination.includes(destination)) {
-                    existingDestination = existingDestination ? existingDestination + '\n' + destination : destination;
-                    values[firstRowIndexInValues][COL_DESTINATION - 1] = existingDestination;
-                    formulas[firstRowIndexInValues][COL_DESTINATION - 1] = '';
-                    existingEntry.needsUpdate = true;
-                }
-
-                let existingQuantity = values[firstRowIndexInValues][COL_QUANTITY - 1];
-                existingQuantity = typeof existingQuantity === 'number' ? existingQuantity : parseFloat(existingQuantity) || 0;
-                let currentQuantity = typeof quantity === 'number' ? quantity : parseFloat(quantity) || 0;
-
-                const newQuantity = existingQuantity + currentQuantity;
-                if (newQuantity !== existingQuantity) {
-                    values[firstRowIndexInValues][COL_QUANTITY - 1] = newQuantity;
-                    formulas[firstRowIndexInValues][COL_QUANTITY - 1] = '';
-                    existingEntry.needsUpdate = true;
-                }
-
-                rowsToDelete.push(i + startRow);
-
-            } else {
-                uniqueItemsMap.set(itemName, { firstRowIndexInValues: i, needsUpdate: false });
-            }
-        }
+    const target = uniqueItems.get(itemName);
+    const currentDestination = String(destination || '');
+    if (currentDestination && !target.destination.includes(currentDestination)) {
+      target.destination = target.destination
+        ? target.destination + '\n' + currentDestination
+        : currentDestination;
+      target.changed = true;
     }
 
-    for (const [itemName, entry] of uniqueItemsMap.entries()) {
-        if (entry.needsUpdate) {
-            const rowInSheet = entry.firstRowIndexInValues + startRow;
-            const rowValuesToUpdate = values[entry.firstRowIndexInValues];
-            const rowFormulasToUpdate = formulas[entry.firstRowIndexInValues];
-
-            const rowDataToWrite = [];
-            for (let j = 0; j < LAST_COLUMN_TO_PROCESS; j++) {
-                rowDataToWrite[j] = rowFormulasToUpdate[j] || rowValuesToUpdate[j];
-            }
-
-            Logger.log(`Обновление объединенной строки для "${itemName}" (строка ${rowInSheet}).`);
-            sheet.getRange(rowInSheet, 1, 1, LAST_COLUMN_TO_PROCESS).setValues([rowDataToWrite]);
-        }
+    const currentQty = typeof quantity === 'number' ? quantity : parseFloat(quantity) || 0;
+    if (currentQty !== 0) {
+      target.quantity += currentQty;
+      target.changed = true;
     }
 
-    rowsToDelete.sort((a, b) => b - a);
+    rowsToDelete.push(i + startRow);
+  }
 
-    if (rowsToDelete.length > 0) {
-        Logger.log(`Начинаем удаление ${rowsToDelete.length} дубликатов.`);
-        for (const rowIndex of rowsToDelete) {
-            Logger.log(`Удаление строки: ${rowIndex}`);
-            sheet.deleteRow(rowIndex);
-        }
-        Logger.log("Удаление дубликатов завершено.");
-    } else {
-        Logger.log("Дубликаты для удаления не найдены.");
-    }
+  // Записываем только реально изменившиеся ячейки, не затрагивая формулы остальных столбцов.
+  for (const entry of uniqueItems.values()) {
+    if (!entry.changed) continue;
+    const sheetRow = entry.rowIndex + startRow;
+    baseSheet.getRange(sheetRow, COL_DESTINATION).setValue(entry.destination);
+    baseSheet.getRange(sheetRow, COL_QUANTITY).setValue(entry.quantity);
+  }
 
-    Logger.log("--- Завершено checkAndMergeDuplicates ---");
+  deleteRowsInBlocks_(baseSheet, rowsToDelete);
 }
