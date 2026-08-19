@@ -1,17 +1,13 @@
-/**
- * Создаёт устанавливаемый onEdit-триггер, если такого триггера ещё нет.
- */
+/** Создаёт устанавливаемый onEdit-триггер, если такого триггера ещё нет. */
 function installEditTrigger() {
   const existing = ScriptApp.getProjectTriggers().some(trigger =>
     trigger.getHandlerFunction() === 'onEditHandler' &&
     trigger.getEventType() === ScriptApp.EventType.ON_EDIT
   );
-
   if (existing) {
     Logger.log('Триггер onEditHandler уже установлен.');
     return;
   }
-
   ScriptApp.newTrigger('onEditHandler')
     .forSpreadsheet(SpreadsheetApp.getActiveSpreadsheet())
     .onEdit()
@@ -19,51 +15,20 @@ function installEditTrigger() {
 }
 
 /**
- * Формирует шаблон строки листа «База».
- * Формулы оставлены без изменения: оптимизация формульной модели таблицы будет
- * выполняться отдельным этапом.
+ * Базовый объект новой строки «База». Формулы сюда принципиально не входят:
+ * вычисляемые столбцы обслуживаются единственными spill-якорями строки 2.
  */
-function buildBaseRowTemplate(futureIndex, sheetColumnCount) {
-  const newRow = Array(sheetColumnCount).fill('');
-
-  newRow[COL_DRAWING - 1] = `=IF(H${futureIndex}="";"";IF(E${futureIndex}="";"";IFERROR(IF(FILTER('Каталог ссылок'!B:B;'Каталог ссылок'!A:A=E${futureIndex})="";"Добавить ссылку в каталог";FILTER('Каталог ссылок'!B:B;'Каталог ссылок'!A:A=E${futureIndex}));"Добавить изделие в каталог ссылок")))`;
-  newRow[COL_LINK - 1] = `=IF(H${futureIndex}="";"";IF(E${futureIndex}="";"";IFERROR(IF(FILTER('Каталог ссылок'!C:C;'Каталог ссылок'!A:A=E${futureIndex})="";"Добавить ссылку в каталог";FILTER('Каталог ссылок'!C:C;'Каталог ссылок'!A:A=E${futureIndex}));"Добавить изделие в каталог ссылок")))`;
-  newRow[COL_UUID - 1] = Utilities.getUuid();
-  newRow[COL_IN_STOCK - 1] = `=IFERROR(IF(E${futureIndex}<>"" ; FILTER('Остатки'!B:B; 'Остатки'!A:A=E${futureIndex}); ""); 0)`;
-  newRow[COL_DEFICIT - 1] = `=IF((H${futureIndex}-I${futureIndex})<0; 0; H${futureIndex}-I${futureIndex})`;
-  newRow[COL_READY_FOR_PRODUCTION - 1] = `=IFERROR(IF(L${futureIndex} = "Да";IF(OR(Z${futureIndex} = "Производство"; Z${futureIndex} = "Склад производства"); "В производстве";IF(OR(Z${futureIndex} = "ОТК"; Z${futureIndex} = "Приемка"; Z${futureIndex} = "Готово"); "Готово";IF(AA${futureIndex} = "В производство";IF(SUM(FILTER(J$2:J; ISNUMBER(SEARCH(E${futureIndex}; F$2:F)))) > 0; "Нет"; "Да");"Покупной")));"Нет");"Комплектующие не найдены")`;
-  newRow[COL_IS_NEED - 1] = `=IF(J${futureIndex}>0; "Да"; "Нет")`;
-  newRow[COL_STATUS - 1] = `=IFNA(INDEX('Настройки'!A$2:A$13; MATCH(FALSE; M${futureIndex}:W${futureIndex}; 0)); "Готово")`;
-  newRow[COL_MODE - 1] = `=IF(E${futureIndex}="";"";IF(COUNTIF('Цена материалов'!A:A; E${futureIndex})=0;"В производство";"В снабжение"))`;
-  newRow[COL_SDID - 1] = `=IFERROR(FILTER('SD ID'!A:A; 'SD ID'!B:B = E${futureIndex});"")`;
-  newRow[COL_TRELLO_ID - 1] = '';
-  newRow[COL_SD_ORDER_ID - 1] = '';
-  newRow[COL_FACT_QTY - 1] = '';
-  newRow[COL_TECHNOLOGIEST_NAME - 1] = '';
-  newRow[COL_DESIGNER_NAME - 1] = '';
-  newRow[COL_SUPPLY_ORDERED - 1] = `=IFERROR(SUM(FILTER('Снабжение'!C:C; 'Снабжение'!A:A = E${futureIndex})); "")`;
-  newRow[COL_TIED_CAPITAL - 1] = `=IFERROR(IF(F${futureIndex}=""; FILTER('ГТ Себестоимость'!C:C; 'ГТ Себестоимость'!A:A = E${futureIndex}); 0); 0) * H${futureIndex}`;
-  newRow[COL_QTY_SD - 1] = `=IFERROR(IF(E${futureIndex}<>""; FILTER('Остатки'!F:F; 'Остатки'!E:E = E${futureIndex}); ""); "")`;
-  newRow[COL_ABC_CATEGORY - 1] = `=IFERROR(IF(F${futureIndex}=""; FILTER(ABC!B:B; ABC!A:A = E${futureIndex}); ""); "")`;
-  newRow[COL_PRIORITY - 1] = '';
-  newRow[COL_EQIPMENT - 1] = `=IFERROR(TEXTJOIN(", "; TRUE; FILTER('Диспетчер оснастки'!A:A; 'Диспетчер оснастки'!B:B = E${futureIndex})); "")`;
-  newRow[COL_DEADLINE - 1] = '';
-
-  for (let col = COL_DESIGN - 1; col <= COL_READY - 1; col++) {
-    newRow[col] = false;
-  }
-
-  return newRow;
+function buildBaseRowTemplate() {
+  const row = { uuid: Utilities.getUuid() };
+  STAGE_FIELD_KEYS.forEach(key => { row[key] = false; });
+  return row;
 }
 
 function columnLetterToNumber(letter) {
   const normalized = String(letter || '').trim().toUpperCase();
   if (!/^[A-Z]+$/.test(normalized)) return 0;
-
   let column = 0;
-  for (let i = 0; i < normalized.length; i++) {
-    column = column * 26 + normalized.charCodeAt(i) - 64;
-  }
+  for (let i = 0; i < normalized.length; i++) column = column * 26 + normalized.charCodeAt(i) - 64;
   return column;
 }
 
@@ -77,26 +42,22 @@ function extractSheetId(link) {
 }
 
 /**
- * Ищет строку по UUID только в столбце D.
- * Раньше функция читала getDataRange(), то есть все ~40 столбцов «Базы» при
- * каждом поиске. TextFinder оставляет поиск на стороне Sheets и не переносит
- * весь лист в память Apps Script.
+ * Ищет UUID. На «База» физический UUID-столбец определяется по schema field_key;
+ * на пользовательских листах интерфейс стабилен и UUID остаётся в D.
  */
 function findRowById(sheet, itemId) {
   if (!sheet || itemId === null || typeof itemId === 'undefined') return null;
-
   const target = String(itemId).trim();
   if (!target) return null;
+  if (sheet.getName() === BASE_SHEET_NAME) return findBaseRowByUuid_(sheet, target);
 
   const lastRow = sheet.getLastRow();
   if (lastRow < 2) return null;
-
   const match = sheet
-    .getRange(2, COL_UUID, lastRow - 1, 1)
+    .getRange(2, ROLE_COL_UUID, lastRow - 1, 1)
     .createTextFinder(target)
     .matchEntireCell(true)
     .findNext();
-
   return match ? match.getRow() : null;
 }
 
@@ -105,55 +66,60 @@ function capitalizeFirstLetter(str) {
   return value ? value.charAt(0).toUpperCase() + value.slice(1) : '';
 }
 
-/**
- * Переносит ручное изменение с листа роли в соответствующий столбец «Базы».
- */
+const ROLE_EDIT_TO_BASE_FIELD = Object.freeze({
+  [ROLE_COL_ITEMNAME]: 'item_name',
+  [ROLE_COL_DESTINATION]: 'destination',
+  [ROLE_COL_NOTE]: 'note',
+  [ROLE_COL_QUANTITY]: 'quantity'
+});
+
+/** Переносит ручное изменение с листа роли в соответствующее семантическое поле «База». */
 function handleNote(ss, sheet, range, row, col, val) {
+  const fieldKey = ROLE_EDIT_TO_BASE_FIELD[col];
+  if (!fieldKey) return;
+
   const value = String(val ?? '').trim();
   range.setValue('');
-
-  const itemId = String(sheet.getRange(row, COL_UUID).getValue() || '').trim();
+  const itemId = String(sheet.getRange(row, ROLE_COL_UUID).getValue() || '').trim();
   if (!itemId) {
     ss.toast(`Идентификатор отсутствует, строка ${row}`, 'Ошибка', 5);
     return;
   }
 
-  const baseSheet = ss.getSheetByName('База');
-  const baseRow = findRowById(baseSheet, itemId);
+  const baseSheet = ss.getSheetByName(BASE_SHEET_NAME);
+  const baseRow = findBaseRowByUuid_(baseSheet, itemId);
   if (!baseRow) {
     ss.toast(`Изделие ${itemId} не найдено в Базе`, 'Ошибка', 5);
     return;
   }
 
-  baseSheet.getRange(baseRow, col).setValue(value);
+  writeBaseFields_(baseSheet, baseRow, { [fieldKey]: value });
   ss.toast('Изменение перенесено в базу', 'Информация', 5);
 }
 
-/**
- * Возвращает изделие на предыдущий этап, снимая соответствующую отметку в «Базе».
- */
-function handleReturn(ss, sheet, range, row, clearColumn) {
+/** Возвращает изделие на предыдущий этап по field_key этапа. */
+function handleReturn(ss, sheet, range, row, clearFieldKey) {
   range.setValue(false);
-
-  const itemId = String(sheet.getRange(row, COL_UUID).getValue() || '').trim();
+  const itemId = String(sheet.getRange(row, ROLE_COL_UUID).getValue() || '').trim();
   if (!itemId) {
     ss.toast(`Идентификатор отсутствует, строка ${row}`, 'Ошибка', 5);
     return;
   }
 
-  const baseSheet = ss.getSheetByName('База');
-  const baseRow = findRowById(baseSheet, itemId);
+  const baseSheet = ss.getSheetByName(BASE_SHEET_NAME);
+  const baseRow = findBaseRowByUuid_(baseSheet, itemId);
   if (!baseRow) {
     ss.toast(`Изделие ${itemId} не найдено в Базе`, 'Ошибка', 5);
     return;
   }
 
-  baseSheet.getRange(baseRow, clearColumn).setValue(false);
+  writeBaseFields_(baseSheet, baseRow, { [clearFieldKey]: false });
   ss.toast('Отметка о готовности снята', 'Информация', 5);
 }
 
 const SHEET_CHECKBOX_SETTINGS = Object.freeze({
   'Проектирование': { firstColumn: 11, count: 1 },
+  'Техконтроль': { firstColumn: 11, count: 2 },
   'Развертывание спецификации': { firstColumn: 11, count: 2 },
   'Технолог': { firstColumn: 11, count: 2 },
   'Проверка технологии': { firstColumn: 11, count: 2 },
@@ -167,23 +133,18 @@ const SHEET_CHECKBOX_SETTINGS = Object.freeze({
   'Готово': { firstColumn: 11, count: 2 }
 });
 
-/**
- * Устанавливает checkbox-validation только в строке текущего изделия.
- * Раньше функция переписывала K:L для всего рабочего листа после каждого клика.
- */
+/** Устанавливает checkbox-validation только в строке текущего изделия. */
 function fillCheckboxes(ss, itemId) {
   if (!itemId) return;
-
-  const baseSheet = ss.getSheetByName('База');
-  const baseRow = findRowById(baseSheet, itemId);
+  const baseSheet = ss.getSheetByName(BASE_SHEET_NAME);
+  const baseRow = findBaseRowByUuid_(baseSheet, itemId);
   if (!baseRow) return;
 
-  const status = String(baseSheet.getRange(baseRow, COL_STATUS).getValue() || '').trim();
+  const status = String(readBaseFields_(baseSheet, baseRow, ['status']).status || '').trim();
   const targetSheet = ss.getSheetByName(status);
   const settings = getSettingsForSheet(status);
   if (!targetSheet || !settings) return;
 
-  // Формула статуса и QUERY-лист должны успеть пересчитаться до поиска UUID.
   SpreadsheetApp.flush();
   const targetRow = findRowById(targetSheet, itemId);
   if (!targetRow) {
@@ -201,14 +162,9 @@ function getSettingsForSheet(targetSheetName) {
   return SHEET_CHECKBOX_SETTINGS[targetSheetName] || null;
 }
 
-/**
- * Определяет последнюю непустую строку указанного столбца.
- * Оставлено как общая утилита для функций, которым нужен именно этот критерий.
- */
 function getLastRow(sheet, col) {
   const lastRow = sheet.getLastRow();
   if (lastRow < 1) return 0;
-
   const values = sheet.getRange(1, col, lastRow, 1).getValues();
   for (let i = values.length - 1; i >= 0; i--) {
     if (String(values[i][0] ?? '').trim() !== '') return i + 1;
@@ -216,85 +172,63 @@ function getLastRow(sheet, col) {
   return 0;
 }
 
-/**
- * Формирует строку для записи развёрнутой спецификации в «База».
- */
+/** Формирует объект новой строки развёрнутой спецификации. */
 function createSpecRow(date, name, fullQty, parentName, futureIndex, parentUUIDForDestination, opCheckboxStatus, totalColumnCount, rowUUID, note = '') {
-  const row = buildBaseRowTemplate(futureIndex, totalColumnCount);
+  const row = buildBaseRowTemplate();
   const now = new Date();
-
-  row[COL_DATE - 1] = date == null ? now : date;
-  row[COL_ITEMNAME - 1] = name;
-
-  if (rowUUID !== null && typeof rowUUID !== 'undefined') {
-    row[COL_UUID - 1] = rowUUID;
-  }
+  row.date = date == null ? now : date;
+  row.item_name = name;
+  if (rowUUID !== null && typeof rowUUID !== 'undefined') row.uuid = rowUUID;
 
   if (parentName != null) {
     const cleanedParentName = String(parentName).replace(/<[^>]*>/g, '');
     const cleanedParentUUID = String(parentUUIDForDestination).replace(/<[^>]*>/g, '');
-    row[COL_DESTINATION - 1] = `${cleanedParentName} = ${fullQty} (${cleanedParentUUID})`;
+    row.destination = `${cleanedParentName} = ${fullQty} (${cleanedParentUUID})`;
   } else {
-    row[COL_DESTINATION - 1] = '';
+    row.destination = '';
   }
 
-  row[COL_QUANTITY - 1] = fullQty;
-  row[COL_NOTE - 1] = note;
-  row[COL_DESIGN - 1] = now;
-  row[COL_TECHNICAL_CONTROL - 1] = now;
-  row[COL_DEPLOYMENT - 1] = now;
-
+  row.quantity = fullQty;
+  row.note = note;
+  row.stage_design = now;
+  row.stage_technical_control = now;
+  row.stage_deployment = now;
   if (opCheckboxStatus === true) {
-    row[COL_TECHNOLOGIEST - 1] = now;
-    row[COL_TECHNOLOGY_CHECK - 1] = now;
+    row.stage_technologist = now;
+    row.stage_technology_check = now;
   }
-
   return row;
 }
 
-/** Удаляет UUID в скобках из текста назначения. */
 function normalizeDestination(destinationString) {
   const guidRegex = /\s\([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\)/g;
   return String(destinationString || '').replace(guidRegex, '');
 }
 
 /**
- * Гарантирует наличие minFreeRows строк, начиная с templateRow, и при необходимости
- * копирует шаблон строки вместе с формулами, форматами и validation.
+ * Общая утилита для ручных/служебных листов. Не использовать для «База»:
+ * формульные столбцы «База» теперь обслуживаются spill-якорями, а не копированием строк.
  */
 function ensureFreeRows(sheet, templateRow, minFreeRows = 100) {
   if (!sheet) throw new Error('ensureFreeRows: sheet is required');
-  if (!Number.isInteger(templateRow) || templateRow < 1) {
-    throw new Error(`ensureFreeRows: templateRow must be positive integer, got ${templateRow}`);
-  }
-  if (!Number.isInteger(minFreeRows) || minFreeRows < 0) {
-    throw new Error(`ensureFreeRows: minFreeRows must be non-negative integer, got ${minFreeRows}`);
-  }
+  if (!Number.isInteger(templateRow) || templateRow < 1) throw new Error(`ensureFreeRows: invalid templateRow ${templateRow}`);
+  if (!Number.isInteger(minFreeRows) || minFreeRows < 0) throw new Error(`ensureFreeRows: invalid minFreeRows ${minFreeRows}`);
 
   let totalRows = sheet.getMaxRows();
   if (templateRow > totalRows) {
     sheet.insertRowsAfter(totalRows, templateRow - totalRows);
     totalRows = sheet.getMaxRows();
   }
-
   const freeRows = totalRows - templateRow + 1;
-  if (freeRows >= minFreeRows) {
-    return { added: 0, freeRows, totalRows };
-  }
+  if (freeRows >= minFreeRows) return { added: 0, freeRows, totalRows };
 
   const rowsToAdd = minFreeRows - freeRows;
   sheet.insertRowsAfter(totalRows, rowsToAdd);
-
   const lastCol = sheet.getLastColumn();
   if (lastCol > 0) {
     const sourceRange = sheet.getRange(templateRow, 1, 1, lastCol);
     const targetRange = sheet.getRange(totalRows + 1, 1, rowsToAdd, lastCol);
     sourceRange.copyTo(targetRange, { contentsOnly: false });
   }
-
-  return {
-    added: rowsToAdd,
-    freeRows: freeRows + rowsToAdd,
-    totalRows: totalRows + rowsToAdd
-  };
+  return { added: rowsToAdd, freeRows: freeRows + rowsToAdd, totalRows: totalRows + rowsToAdd };
 }
