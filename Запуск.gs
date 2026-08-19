@@ -59,10 +59,13 @@ function handleLaunchEdit(ss, launchSheet, rowNumber) {
     SpreadsheetApp.newDataValidation().requireCheckbox().setAllowInvalid(false).build()
   );
 
+  // deleteRows() физически уменьшает число строк листа. Чтобы лист «Запуск» не
+  // сжимался после каждого переноса, возвращаем ровно столько пустых строк,
+  // сколько было удалено. Это сохраняет текущий размер листа без исторического
+  // механизма расширения до 50+ строк.
   deleteRowsInBlocks_(launchSheet, rowsToDelete);
+  restoreLaunchInputRows_(launchSheet, rowsToDelete.length);
 
-  // Исправлено: раньше здесь использовалась несуществующая переменная `sheet`.
-  ensureFreeRows(launchSheet, 18, 50);
   ss.toast('Изделие(я) добавлено(ы) в базу', 'Информация', 5);
 }
 
@@ -93,8 +96,30 @@ function writeRowsToSheetForLaunch(sheet, startRow, rows, columnCount) {
 }
 
 /**
- * Удаляет набор строк снизу вверх блоками. Для массового ручного запуска это
- * сокращает количество структурных операций Sheets по сравнению с deleteRow().
+ * Возвращает в конец «Запуск» удалённое количество строк и восстанавливает
+ * в столбце E checkbox-validation. Данные A:D остаются пустыми.
+ */
+function restoreLaunchInputRows_(sheet, count) {
+  if (!count || count < 1) return;
+
+  const previousMaxRows = sheet.getMaxRows();
+  sheet.insertRowsAfter(previousMaxRows, count);
+
+  const firstNewRow = previousMaxRows + 1;
+  const rule = SpreadsheetApp.newDataValidation()
+    .requireCheckbox()
+    .setAllowInvalid(false)
+    .build();
+
+  sheet
+    .getRange(firstNewRow, COL_LAUNCH_TRIGGER, count, 1)
+    .setDataValidation(rule)
+    .setValue(false);
+}
+
+/**
+ * Удаляет набор строк снизу вверх непрерывными блоками, сокращая количество
+ * структурных операций Sheets по сравнению с deleteRow() для каждой строки.
  */
 function deleteRowsInBlocks_(sheet, rowNumbers) {
   if (!rowNumbers || rowNumbers.length === 0) return;
