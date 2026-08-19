@@ -18,6 +18,20 @@ const EDIT_QUEUE_CFG = {
   DRAIN_TIME_LIMIT_MS: 240000
 };
 
+/**
+ * Настройки системных уведомлений. Отрицательный timeout оставляет toast на
+ * экране до тех пор, пока его не заменит следующий статус или пользователь не
+ * закроет уведомление вручную.
+ */
+const STATUS_TOAST_CFG = Object.freeze({
+  TITLE: 'Диспетчер',
+  QUEUED_TIMEOUT: -1,
+  WORKING_TIMEOUT: -1,
+  SUCCESS_TIMEOUT: 5,
+  NOT_DONE_TIMEOUT: 8,
+  ERROR_TIMEOUT: 10
+});
+
 const _sheetToBaseColumnMaps = new Map();
 let _roleSheetConfigCache = null;
 
@@ -98,6 +112,112 @@ function getRoleSheetConfig_() {
   return _roleSheetConfigCache;
 }
 
+/** Возвращает название длительного/чекбоксного действия или пустую строку. */
+function getTrackedActionName_(sheetName, col, value) {
+  const isTrue = isTrueEditValue_(value);
+
+  if (sheetName === 'Запуск' && col === COL_LAUNCH_TRIGGER && isTrue) {
+    return 'Запуск изделия';
+  }
+
+  if (sheetName === 'Развертывание спецификации') {
+    if (col === COL_CHECKBOX && isTrue) return 'Развертывание спецификации';
+    if (col === COL_RETURN_CHECKBOX && isTrue) return 'Возврат на предыдущий этап';
+    return '';
+  }
+
+  if (sheetName === 'База') {
+    if (col === COL_DEPLOYMENT) {
+      return isTrue ? 'Развертывание спецификации' : 'Сворачивание спецификации';
+    }
+
+    if (isTrue && col >= COL_DESIGN && col <= COL_READY) {
+      switch (col) {
+        case COL_DESIGN: return 'Проектирование';
+        case COL_TECHNICAL_CONTROL: return 'Техконтроль';
+        case COL_TECHNOLOGIEST: return 'Технолог';
+        case COL_TECHNOLOGY_CHECK: return 'Проверка технологии';
+        case COL_PICKER: return 'Диспетчер-комплектовщик';
+        case COL_PICKING: return 'Комплектация';
+        case COL_STOCK: return 'Склад';
+        case COL_PRODUCTION_STOCK: return 'Склад производства';
+        case COL_PRODUCTION: return 'Производство';
+        case COL_QUALITY_CHECK: return 'ОТК';
+        case COL_ACCEPTANCE: return 'Приемка';
+        case COL_READY: return 'Готово';
+      }
+    }
+    return '';
+  }
+
+  const roleConfig = getRoleSheetConfig_()[sheetName];
+  if (roleConfig && isTrue) {
+    if (col === COL_CHECKBOX) return `Этап «${sheetName}»`;
+    if (col === COL_RETURN_CHECKBOX && roleConfig.returnColumn) {
+      return `Возврат из «${sheetName}»`;
+    }
+  }
+
+  // Поддерживает дополнительные однотипные листы, заданные через «Настройки».
+  if (isTrue && col === COL_CHECKBOX) return `Этап «${sheetName}»`;
+  return '';
+}
+
+/** Получает имя изделия только для отслеживаемых операций. */
+function getStatusItemName_(sheet, row, sheetName) {
+  try {
+    const itemColumn = sheetName === 'Запуск' ? 1 : COL_ITEMNAME;
+    return String(sheet.getRange(row, itemColumn).getDisplayValue() || '').trim();
+  } catch (error) {
+    Logger.log(`getStatusItemName_: ${error.message}`);
+    return '';
+  }
+}
+
+function buildStatusLabel_(actionName, itemName) {
+  if (!actionName) return '';
+  return itemName ? `${actionName}: «${itemName}»` : actionName;
+}
+
+/** Единая точка отображения состояния длительной операции. */
+function showActionStatus_(ss, state, label, details) {
+  if (!ss || !label) return;
+
+  let message;
+  let timeout;
+  switch (state) {
+    case 'queued':
+      message = `⏳ В очереди: ${label}`;
+      timeout = STATUS_TOAST_CFG.QUEUED_TIMEOUT;
+      break;
+    case 'working':
+      message = `⚙️ Выполняется: ${label}`;
+      timeout = STATUS_TOAST_CFG.WORKING_TIMEOUT;
+      break;
+    case 'success':
+      message = `✅ Завершено: ${label}`;
+      timeout = STATUS_TOAST_CFG.SUCCESS_TIMEOUT;
+      break;
+    case 'notDone':
+      message = `⚠️ Операция не выполнена: ${label}`;
+      timeout = STATUS_TOAST_CFG.NOT_DONE_TIMEOUT;
+      break;
+    case 'error':
+      message = `❌ Ошибка: ${label}`;
+      if (details) message += `\n${details}`;
+      timeout = STATUS_TOAST_CFG.ERROR_TIMEOUT;
+      break;
+    default:
+      return;
+  }
+
+  try {
+    ss.toast(message, STATUS_TOAST_CFG.TITLE, timeout);
+  } catch (error) {
+    Logger.log(`showActionStatus_: ${error.message}`);
+  }
+}
+
 function onEditHandler(e) {
   if (!e || !e.range) {
     Logger.log('onEditHandler: событие отсутствует или не содержит range.');
@@ -109,6 +229,8 @@ function onEditHandler(e) {
     const sheet = range.getSheet();
     const spreadsheet = e.source || sheet.getParent();
     const rawValue = (typeof e.value !== 'undefined') ? e.value : range.getValue();
+    const actionName = getTrackedActionName_(sheet.getName(), range.getColumn(), rawValue);
+    const itemName = actionName ? getStatusItemName_(sheet, range.getRow(), sheet.getName()) : '';
 
     const payload = {
       ts: Date.now(),
@@ -118,12 +240,21 @@ function onEditHandler(e) {
       a1Notation: range.getA1Notation(),
       row: range.getRow(),
       column: range.getColumn(),
-      value: rawValue
+      value: rawValue,
+      trackStatus: Boolean(actionName),
+      statusLabel: buildStatusLabel_(actionName, itemName)
     };
 
     if (!enqueueEditEvent_(payload)) {
       Logger.log(`onEditHandler: не удалось поставить событие ${payload.id} в очередь.`);
+      if (payload.trackStatus) {
+        showActionStatus_(spreadsheet, 'error', payload.statusLabel, 'Не удалось поставить задачу в очередь.');
+      }
       return;
+    }
+
+    if (payload.trackStatus) {
+      showActionStatus_(spreadsheet, 'queued', payload.statusLabel);
     }
 
     tryProcessEditQueue_();
@@ -159,8 +290,6 @@ function enqueueEditEvent_(payload) {
     tail += 1;
     props.setProperty(queueEventKey_(tail), JSON.stringify(payload));
 
-    // При переполнении удаляем самые старые записи. В штатном режиме за один
-    // enqueue удаляется максимум одна запись.
     while (tail - head + 1 > EDIT_QUEUE_CFG.MAX_QUEUE_LEN) {
       props.deleteProperty(queueEventKey_(head));
       head += 1;
@@ -186,17 +315,45 @@ function tryProcessEditQueue_() {
       const next = dequeueOneEvent_();
       if (!next) return;
 
+      let statusSs = null;
       try {
-        mainEditLogic(next);
+        if (next.trackStatus) {
+          statusSs = SpreadsheetApp.openById(next.spreadsheetId);
+          showActionStatus_(statusSs, 'working', next.statusLabel);
+        }
+
+        const result = mainEditLogic(next, statusSs);
+
+        if (next.trackStatus) {
+          showActionStatus_(
+            statusSs,
+            result === false ? 'notDone' : 'success',
+            next.statusLabel
+          );
+        }
       } catch (error) {
         Logger.log(`[QUEUE] событие ${next.id || 'unknown'} завершилось ошибкой: ` +
           (error && error.stack ? error.stack : error));
+
+        if (next.trackStatus) {
+          if (!statusSs) {
+            try {
+              statusSs = SpreadsheetApp.openById(next.spreadsheetId);
+            } catch (openError) {
+              Logger.log(`[QUEUE] не удалось открыть таблицу для toast: ${openError.message}`);
+            }
+          }
+          showActionStatus_(
+            statusSs,
+            'error',
+            next.statusLabel || 'операция',
+            error && error.message ? error.message : String(error)
+          );
+        }
       }
     }
     Logger.log('[QUEUE] достигнут лимит времени; оставшиеся события будут обработаны следующим запуском.');
   } finally {
-    // Google рекомендует зафиксировать отложенные spreadsheet-изменения до
-    // освобождения lock, если lock сериализует операции с таблицей.
     SpreadsheetApp.flush();
     processorLock.releaseLock();
   }
@@ -219,7 +376,6 @@ function dequeueOneEvent_() {
       head += 1;
 
       if (head > tail) {
-        // Очередь опустела — сбрасываем счётчики, чтобы они не росли бесконечно.
         head = 1;
         tail = 0;
       }
@@ -258,12 +414,17 @@ function isTrueEditValue_(value) {
   return value === true || String(value).toUpperCase() === 'TRUE';
 }
 
-function mainEditLogic(eventData) {
+/**
+ * Выполняет одно событие очереди.
+ * Возвращает false, если отслеживаемая операция не была выполнена; любое другое
+ * значение трактуется очередью как штатное завершение.
+ */
+function mainEditLogic(eventData, openedSpreadsheet) {
   if (!eventData || !eventData.spreadsheetId || !eventData.sheetName) {
     throw new Error('mainEditLogic: неполные данные события.');
   }
 
-  const ss = SpreadsheetApp.openById(eventData.spreadsheetId);
+  const ss = openedSpreadsheet || SpreadsheetApp.openById(eventData.spreadsheetId);
   const sheetName = eventData.sheetName;
   const row = eventData.row;
   const col = eventData.column;
@@ -273,37 +434,33 @@ function mainEditLogic(eventData) {
 
   if (!sheet) {
     Logger.log(`mainEditLogic: лист «${sheetName}» не найден.`);
-    return;
+    return false;
   }
 
   const range = sheet.getRange(row, col);
 
   if (sheetName === 'Запуск') {
-    handleLaunchEvent_(ss, sheet, range, row, col, isTrue);
-    return;
+    return handleLaunchEvent_(ss, sheet, range, row, col, isTrue);
   }
 
   if (sheetName === 'Развертывание спецификации') {
-    handleDeploymentSheetEvent_(ss, sheet, range, row, col, val, isTrue);
-    return;
+    return handleDeploymentSheetEvent_(ss, sheet, range, row, col, val, isTrue);
   }
 
   if (sheetName === 'База') {
-    handleBaseEdit_(ss, sheet, range, row, col, val, isTrue);
-    return;
+    return handleBaseEdit_(ss, sheet, range, row, col, val, isTrue);
   }
 
   const roleConfig = getRoleSheetConfig_()[sheetName];
   if (roleConfig) {
-    handleRoleSheetEdit_(ss, sheet, range, row, col, val, isTrue, roleConfig);
-    return;
+    return handleRoleSheetEdit_(ss, sheet, range, row, col, val, isTrue, roleConfig);
   }
 
-  handleNewSheetEdit(ss, sheet, row, col, val);
+  return Boolean(handleNewSheetEdit(ss, sheet, row, col, val));
 }
 
 function handleLaunchEvent_(ss, sheet, range, row, col, isTrue) {
-  if (col !== COL_LAUNCH_TRIGGER || !isTrue) return;
+  if (col !== COL_LAUNCH_TRIGGER || !isTrue) return false;
 
   const launchData = sheet.getRange(row, 1, 1, 3).getValues()[0];
   const itemName = String(launchData[0] ?? '').trim();
@@ -312,16 +469,17 @@ function handleLaunchEvent_(ss, sheet, range, row, col, isTrue) {
   if (!itemName || !quantity) {
     ss.toast('Недостаточно данных для внесения изделия в базу данных Диспетчера', 'Ошибка', 5);
     range.setValue(false);
-    return;
+    return false;
   }
 
   handleLaunchEdit(ss, sheet, row);
+  return true;
 }
 
 function handleDeploymentSheetEvent_(ss, sheet, range, row, col, val, isTrue) {
   if (col === COL_ITEMNAME || col === COL_NOTE || col === COL_QUANTITY) {
     handleNote(ss, sheet, range, row, col, val);
-    return;
+    return true;
   }
 
   if (col === COL_CHECKBOX && isTrue) {
@@ -336,32 +494,35 @@ function handleDeploymentSheetEvent_(ss, sheet, range, row, col, val, isTrue) {
     if (!baseSheet) throw new Error('Лист «База» не найден.');
 
     range.setValue(false);
-    handleDeployment(itemUUID, itemName, ss, baseSheet, row, initialQuantity);
-    return;
+    return Boolean(handleDeployment(itemUUID, itemName, ss, baseSheet, row, initialQuantity));
   }
 
   if (col === COL_RETURN_CHECKBOX && isTrue) {
     handleReturn(ss, sheet, range, row, COL_TECHNICAL_CONTROL);
+    return true;
   }
+
+  return false;
 }
 
 function handleRoleSheetEdit_(ss, sheet, range, row, col, val, isTrue, config) {
   if (config.noteColumns.indexOf(col) !== -1) {
     handleNote(ss, sheet, range, row, col, val);
-    return;
+    return true;
   }
 
   if (col === COL_RETURN_CHECKBOX && isTrue && config.returnColumn) {
     handleReturn(ss, sheet, range, row, config.returnColumn);
-    return;
+    return true;
   }
 
-  if (col !== COL_CHECKBOX || !isTrue) return;
+  if (col !== COL_CHECKBOX || !isTrue) return false;
 
   const itemId = runRoleCompletion_(config.completion, ss, sheet, range, row, col, val);
   if (itemId && config.fillNextStage !== false) {
     fillCheckboxes(ss, itemId);
   }
+  return Boolean(itemId);
 }
 
 function runRoleCompletion_(completion, ss, sheet, range, row, col, val) {
@@ -399,38 +560,38 @@ function handleBaseEdit_(ss, sheet, range, row, col, val, isTrue) {
       const initialQuantity = rowData[COL_QUANTITY - COL_UUID];
 
       if (booleanVal) {
-        handleDeployment(itemUUID, itemName, ss, sheet, row, initialQuantity);
-      } else {
-        handleUndeployment(ss, sheet, row);
+        return Boolean(handleDeployment(itemUUID, itemName, ss, sheet, row, initialQuantity));
       }
-      return;
+
+      handleUndeployment(ss, sheet, row);
+      return true;
     }
 
     case COL_PICKER:
-      if (isTrue) handleSupplyOrder(ss, sheet, range, row);
-      return;
+      return isTrue ? Boolean(handleSupplyOrder(ss, sheet, range, row)) : false;
 
     case COL_STOCK:
-      if (isTrue) handleStock(ss, sheet, range, row);
-      return;
+      return isTrue ? Boolean(handleStock(ss, sheet, range, row)) : false;
 
     case COL_PRODUCTION_STOCK:
-      if (isTrue) handleProductionStock(ss, sheet, range, row);
-      return;
+      return isTrue ? Boolean(handleProductionStock(ss, sheet, range, row)) : false;
 
     case COL_ACCEPTANCE:
       if (isTrue) {
         ss.toast('Для выполнения приемки перейдите на соответствующий лист', 'Ошибка', 5);
         range.setValue(false);
       }
-      return;
+      return false;
 
     case COL_READY:
-      if (isTrue) handleReady(ss, sheet, range, row);
-      return;
+      return isTrue ? Boolean(handleReady(ss, sheet, range, row)) : false;
 
     default:
-      if (isTrue) checkboxOk(range);
+      if (isTrue) {
+        checkboxOk(range);
+        return true;
+      }
+      return false;
   }
 }
 
