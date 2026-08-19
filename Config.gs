@@ -1,58 +1,26 @@
 ///*********************** Глобальные Константы *************************/
-// Номера столбцов листа «База» (1-индексация).
-const COL_DATE                    = 1;  // A
-const COL_DRAWING                 = 2;  // B
-const COL_LINK                    = 3;  // C
-const COL_UUID                    = 4;  // D
-const COL_ITEMNAME                = 5;  // E
-const COL_DESTINATION             = 6;  // F
-const COL_NOTE                    = 7;  // G
-const COL_QUANTITY                = 8;  // H
-const COL_IN_STOCK                = 9;  // I
-const COL_DEFICIT                 = 10; // J
-const COL_READY_FOR_PRODUCTION    = 11; // K
-const COL_IS_NEED                 = 12; // L
-const COL_DESIGN                  = 13; // M
-const COL_TECHNICAL_CONTROL       = 14; // N
-const COL_DEPLOYMENT              = 15; // O
-const COL_TECHNOLOGIEST           = 16; // P
-const COL_TECHNOLOGY_CHECK        = 17; // Q
-const COL_PICKER                  = 18; // R
-const COL_PICKING                 = 19; // S
-const COL_STOCK                   = 20; // T
-const COL_PRODUCTION_STOCK        = 21; // U
-const COL_PRODUCTION              = 22; // V
-const COL_QUALITY_CHECK           = 23; // W
-const COL_ACCEPTANCE              = 24; // X
-const COL_READY                   = 25; // Y
-const COL_STATUS                  = 26; // Z
-const COL_MODE                    = 27; // AA
-const COL_SDID                    = 28; // AB
-const COL_TRELLO_ID               = 29; // AC
-const COL_SD_ORDER_ID             = 30; // AD
-const COL_FACT_QTY                = 31; // AE
-const COL_TECHNOLOGIEST_NAME      = 32; // AF
-const COL_DESIGNER_NAME           = 33; // AG
-const COL_SUPPLY_ORDERED          = 34; // AH
-const COL_TIED_CAPITAL            = 35; // AI
-const COL_QTY_SD                  = 36; // AJ
-const COL_ABC_CATEGORY            = 37; // AK
 
 /**
- * ВАЖНО: в текущей «Диспетчер 3.1 опытный» заголовки AL:AN уже не совпадают
- * с историческими семантическими именами этих констант. Значения оставлены
- * неизменными, чтобы этот performance-refactor не менял формульную/табличную
- * архитектуру. Согласовать AL:AN нужно отдельным рефакторингом таблицы.
+ * ВАЖНО: номера ниже относятся только к стабильному пользовательскому интерфейсу
+ * листов исполнителей A:L. Лист «База» НЕ имеет фиксированных COL_*: его поля
+ * разрешаются по field_key через TableArchitecture.gs.
  */
-const COL_PRIORITY                = 38; // AL — историческое назначение
-const COL_EQIPMENT                = 39; // AM — историческое назначение
-const COL_DEADLINE                = 40; // AN — историческое назначение
-var LAST_BASE_COLUMN              = 40;
+const ROLE_COL_DATE             = 1;  // A
+const ROLE_COL_DRAWING          = 2;  // B
+const ROLE_COL_ORDER_LINK       = 3;  // C
+const ROLE_COL_UUID             = 4;  // D
+const ROLE_COL_ITEMNAME         = 5;  // E
+const ROLE_COL_DESTINATION      = 6;  // F
+const ROLE_COL_NOTE             = 7;  // G
+const ROLE_COL_QUANTITY         = 8;  // H
+const ROLE_COL_STOCK            = 9;  // I
+const ROLE_COL_DEFICIT          = 10; // J
+const COL_CHECKBOX              = 11; // K
+const COL_RETURN_CHECKBOX       = 12; // L
+const COL_LAUNCH_TRIGGER        = 5;  // E на листе «Запуск»
 
-// Универсальные столбцы на листах исполнителей.
-const COL_CHECKBOX                = 11; // K
-const COL_RETURN_CHECKBOX         = 12; // L
-const COL_LAUNCH_TRIGGER          = 5;  // E на листе «Запуск»
+// Служебная проекция листов исполнителей находится далеко справа и скрыта.
+const ROLE_HELPER_FIRST_COLUMN = 53; // BA
 
 // «Каталог ссылок».
 const CATALOG_COL_ITEMNAME = 1;
