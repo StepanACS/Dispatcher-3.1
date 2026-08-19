@@ -1,66 +1,77 @@
 ///*********************** Глобальные Константы *************************/
-// Эти константы определяют номера столбцов в листе База (используется 1-индексация)
-const COL_DATE                    = 1;  // Столбец A – Дата создания записи
-const COL_DRAWING                 = 2;  // Столбец B – Ссылка на КД
-const COL_LINK                    = 3;  // Столбец C – Ссылка на наряд
-const COL_UUID                    = 4;  // Столбец D – Уникальный идентификатор (UUID)
-const COL_ITEMNAME                = 5;  // Столбец E – Название изделия (ключовое поле)
-const COL_DESTINATION             = 6;  // Столбец F – Назначение
-const COL_NOTE                    = 7;  // Столбец G – Примечание
-const COL_QUANTITY                = 8;  // Столбец H – Количество изделий
-const COL_IN_STOCK                = 9;  // Столбец I – Количество на складе
-const COL_DEFICIT                 = 10; // Столбец J – Дефицит
-const COL_READY_FOR_PRODUCTION    = 11; // Столбец K – Готовность к производству
-const COL_IS_NEED                 = 12; // Столбец L – Есть ли потребность
-const COL_DESIGN                  = 13; // Столбец M – Наличие КД
-const COL_TECHNICAL_CONTROL       = 14; // Столбец N – Отметка о выполнении технического контроля после проектирования
-const COL_DEPLOYMENT              = 15; // Столбец O – Отметка о развертывании спецификации на листе "База"
-const COL_TECHNOLOGIEST           = 16; // Столбец P – Отметка технолога
-const COL_TECHNOLOGY_CHECK        = 17; // Столбец Q – Отметка о проверке технологии
-const COL_PICKER                  = 18; // Столбец R – Отметка о выполнении задачи диспетчера - комплектовщика на листе "База"
-const COL_PICKING                 = 19; // Столбец S – Отметка о комплектации заказа
-const COL_STOCK                   = 20; // Столбец T – Отметка о выполнении задачи склада на листе "База"
-const COL_PRODUCTION_STOCK        = 21; // Столбец U – Отметка о выдаче зарезервированных товаров в производство
-const COL_PRODUCTION              = 22; // Столбец V – Отметка о выполнении задач производства
-const COL_QUALITY_CHECK           = 23; // Столбец W – Отметка о выполнении ОТК
-const COL_ACCEPTANCE              = 24; // Столбец X – Отметка о приемке изделий с фиксацией фактического количества
-const COL_READY                   = 25; // Столбец Y – Отметка о передаче в архив (Готово) на листе "База"
-const COL_STATUS                  = 26; // Столбец Z – Статус - на каком этапе обработки находится строка
-const COL_MODE                    = 27; // Столбец AA – Способ получения ("В производство" или "В снабжение")
-const COL_SDID                    = 28; // Столбец AB – Уникальный идентификатор из системы SalesDrive
-const COL_TRELLO_ID               = 29; // Столбец AC – Уникальный идентификатор карточки в Trello
-const COL_SD_ORDER_ID             = 30; // Столбец AD – Уникальный идентификатор заказа в системе SalesDrive
-const COL_FACT_QTY                = 31; // Столбец AE – Фактически принятое количество
+// Номера столбцов листа «База» (1-индексация).
+const COL_DATE                    = 1;  // A
+const COL_DRAWING                 = 2;  // B
+const COL_LINK                    = 3;  // C
+const COL_UUID                    = 4;  // D
+const COL_ITEMNAME                = 5;  // E
+const COL_DESTINATION             = 6;  // F
+const COL_NOTE                    = 7;  // G
+const COL_QUANTITY                = 8;  // H
+const COL_IN_STOCK                = 9;  // I
+const COL_DEFICIT                 = 10; // J
+const COL_READY_FOR_PRODUCTION    = 11; // K
+const COL_IS_NEED                 = 12; // L
+const COL_DESIGN                  = 13; // M
+const COL_TECHNICAL_CONTROL       = 14; // N
+const COL_DEPLOYMENT              = 15; // O
+const COL_TECHNOLOGIEST           = 16; // P
+const COL_TECHNOLOGY_CHECK        = 17; // Q
+const COL_PICKER                  = 18; // R
+const COL_PICKING                 = 19; // S
+const COL_STOCK                   = 20; // T
+const COL_PRODUCTION_STOCK        = 21; // U
+const COL_PRODUCTION              = 22; // V
+const COL_QUALITY_CHECK           = 23; // W
+const COL_ACCEPTANCE              = 24; // X
+const COL_READY                   = 25; // Y
+const COL_STATUS                  = 26; // Z
+const COL_MODE                    = 27; // AA
+const COL_SDID                    = 28; // AB
+const COL_TRELLO_ID               = 29; // AC
+const COL_SD_ORDER_ID             = 30; // AD
+const COL_FACT_QTY                = 31; // AE
+const COL_TECHNOLOGIEST_NAME      = 32; // AF
+const COL_DESIGNER_NAME           = 33; // AG
+const COL_SUPPLY_ORDERED          = 34; // AH
+const COL_TIED_CAPITAL            = 35; // AI
+const COL_QTY_SD                  = 36; // AJ
+const COL_ABC_CATEGORY            = 37; // AK
 
-const COL_TECHNOLOGIEST_NAME      = 32; // Столбец AF – Имя технолога
-const COL_DESIGNER_NAME           = 33; // Столбец AG – Имя конструктора
-const COL_SUPPLY_ORDERED          = 34; // Столбец AH – Заказано в снабжении
-const COL_TIED_CAPITAL            = 35; // Столбец AI – Связанный капитал
-const COL_QTY_SD                  = 36; // Столбец AJ – Количество из СД
-const COL_ABC_CATEGORY            = 37; // Столбец AK – Категория из ABC анализа
-const COL_PRIORITY                = 38; // Столбец AL – Приоритет в производстве
-const COL_EQIPMENT                = 39; // Столбец AM – Оснастка
-const COL_DEADLINE                = 40; // Столбец AN – Срок сдачи продукции
+/**
+ * ВАЖНО: в текущей «Диспетчер 3.1 опытный» заголовки AL:AN уже не совпадают
+ * с историческими семантическими именами этих констант. Значения оставлены
+ * неизменными, чтобы этот performance-refactor не менял формульную/табличную
+ * архитектуру. Согласовать AL:AN нужно отдельным рефакторингом таблицы.
+ */
+const COL_PRIORITY                = 38; // AL — историческое назначение
+const COL_EQIPMENT                = 39; // AM — историческое назначение
+const COL_DEADLINE                = 40; // AN — историческое назначение
+var LAST_BASE_COLUMN              = 40;
 
-var LAST_BASE_COLUMN              = 40; // Столбец AN – Последний используемый столбец
+// Универсальные столбцы на листах исполнителей.
+const COL_CHECKBOX                = 11; // K
+const COL_RETURN_CHECKBOX         = 12; // L
+const COL_LAUNCH_TRIGGER          = 5;  // E на листе «Запуск»
 
-// Универсальные столбцы с чекбоксами на страницах исполнителей
-const COL_CHECKBOX                = 11; // Столбец K – Отметка о готовности
-const COL_RETURN_CHECKBOX         = 12; // Столбец L – Возврат на предыдущий этап
-const COL_LAUNCH_TRIGGER          = 5;  // Столбец E – запуск переноса с листа «Запуск»
-
-// Лист «Каталог ссылок»
+// «Каталог ссылок».
 const CATALOG_COL_ITEMNAME = 1;
 const CATALOG_COL_LINK = 3;
 
-// Firestore
+// Внешние таблицы. Все ID собраны здесь, чтобы они не были размазаны по handlers.
+const MAIN_CATALOG_SHEET_ID = '1JTr3AFm5Q1ycipTsrC5qY-SGKWY3v_w_2Jgfhq2xHgU';
+const SUPPLY_SPREADSHEET_ID = '1j_5fbonKWN5O5F7EeHDRjanm5d-fhWR0K2m2SO_EvSc';
+const ARCHIVE_SPREADSHEET_ID = '1oPsmDHUGmN0ZmzYbEMp137Px_KsxDcZRx4PhceUp-3g';
+const PRICE_DB_SPREADSHEET_ID = '1wR3wybH7UplH0ogrrELf1S27N9O5t5DS9lIkBHeagJ8';
+
+// Firestore.
 const PRODUCTS_COLLECTION = 'Products';
+const MAX_SPEC_DEPTH = 10;
 let _firestoreConfigCache = null;
 
 /**
  * Читает учётные данные Firestore только тогда, когда Firestore действительно
- * используется. Раньше три обращения к ScriptProperties выполнялись при каждом
- * запуске проекта, включая обычные onEdit, не связанные с Firestore.
+ * используется. Обычные onEdit, не связанные с Firestore, ScriptProperties не читают.
  */
 function getFirestoreConfig_() {
   if (_firestoreConfigCache) return _firestoreConfigCache;
@@ -81,6 +92,3 @@ function getFirestoreConfig_() {
   };
   return _firestoreConfigCache;
 }
-
-const MAX_SPEC_DEPTH = 10;
-const MAIN_CATALOG_SHEET_ID = '1JTr3AFm5Q1ycipTsrC5qY-SGKWY3v_w_2Jgfhq2xHgU';
