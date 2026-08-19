@@ -1,621 +1,508 @@
 /**
- * Основной обработчик редактирования — выполняет задачу напрямую.
- */
-/**
- * onEditHandler(e)
- * ------------------------------------------------------------
- * Идеология:
- * 1) onEdit должен выполняться быстро: только собрать контекст и положить событие в очередь.
- * 2) Очередь хранится в DocumentProperties (общая для всех пользователей этого файла).
- * 3) Один “процессор” (победитель по LockService) последовательно вынимает события из очереди
- *    и вызывает mainEditLogic(payload) строго по одному.
+ * Основной обработчик редактирования.
  *
- * Важно:
- * - В очередь нельзя класть объекты Sheet/Range (они не сериализуются). Поэтому sourceSheet не передаем.
- * - При обработке mainEditLogic(payload) при необходимости заново получайте sheet через
- *   SpreadsheetApp.getActive().getSheetByName(payload.sheetName).
+ * onEdit выполняет только короткую операцию постановки события в очередь. Очередь
+ * хранится в DocumentProperties отдельными записями, поэтому одно событие не может
+ * превысить лимит свойства из-за роста общего JSON-массива.
+ *
+ * DocumentLock защищает только короткие операции с очередью. Длительная бизнес-
+ * логика выполняется под ScriptLock, поэтому новые onEdit могут продолжать ставить
+ * события в очередь, пока предыдущие события обрабатываются.
  */
 
-// ------------------------- CONFIG -------------------------
 const EDIT_QUEUE_CFG = {
-  QUEUE_PROP_KEY: 'EDIT_QUEUE_V1',     // где хранится очередь
-  MAX_QUEUE_LEN: 300,                  // защита от раздувания (подберите)
-  PROCESS_LOCK_WAIT_MS: 15000,         // ждать ли процессору захват замка
-  ENQUEUE_LOCK_WAIT_MS: 2000,          // короткий замок на добавление в очередь
-  DRAIN_TIME_LIMIT_MS: 240000          // ограничение “дренажа” за один запуск (≈4 мин)
+  QUEUE_PREFIX: 'EDIT_QUEUE_V2_',
+  MAX_QUEUE_LEN: 300,
+  ENQUEUE_LOCK_WAIT_MS: 5000,
+  QUEUE_LOCK_WAIT_MS: 5000,
+  PROCESS_LOCK_WAIT_MS: 50,
+  DRAIN_TIME_LIMIT_MS: 240000
 };
 
-// ------------------------- ENTRY POINT -------------------------
-function onEditHandler(e) {
-  Logger.log('--- Начало onEditHandler ---');
+const _sheetToBaseColumnMaps = new Map();
 
+function onEditHandler(e) {
   if (!e || !e.range) {
-    Logger.log("Ошибка: событие 'e' пустое или без range. Возможно, ручной запуск.");
-    Logger.log('--- Конец onEditHandler ---');
+    Logger.log('onEditHandler: событие отсутствует или не содержит range.');
     return;
   }
 
   try {
     const range = e.range;
     const sheet = range.getSheet();
-
-    // Нормализуем value: для чекбокса e.value обычно строка "TRUE"/"FALSE", для некоторых случаев e.value undefined
+    const spreadsheet = e.source || sheet.getParent();
     const rawValue = (typeof e.value !== 'undefined') ? e.value : range.getValue();
 
     const payload = {
-      // метаданные события
       ts: Date.now(),
       id: Utilities.getUuid(),
-
+      spreadsheetId: spreadsheet.getId(),
       sheetName: sheet.getName(),
       a1Notation: range.getA1Notation(),
       row: range.getRow(),
       column: range.getColumn(),
-
-      // значение (храним как есть, без попытки привести к типу)
-      value: rawValue,
-
-      // пользователь/режим (в установленных триггерах Session.getActiveUser() часто пустой)
-      user: safeGetActiveUserEmail_(),
-      authMode: e.authMode
+      value: rawValue
     };
 
-    Logger.log(`onEditHandler: enqueue ${payload.sheetName}!${payload.a1Notation}, value='${payload.value}'`);
+    if (!enqueueEditEvent_(payload)) {
+      Logger.log(`onEditHandler: не удалось поставить событие ${payload.id} в очередь.`);
+      return;
+    }
 
-    // 1) Кладем событие в очередь (под коротким замком)
-    enqueueEditEvent_(payload);
-
-    // 2) Пытаемся стать “процессором” и обработать очередь (если уже есть процессор — просто выходим)
     tryProcessEditQueue_();
-
   } catch (error) {
-    Logger.log('onEditHandler: Общая ошибка: ' + (error && error.message ? error.message : error));
+    Logger.log('onEditHandler: ' + (error && error.stack ? error.stack : error));
   }
-
-  Logger.log('--- Конец onEditHandler ---');
 }
 
-// ------------------------- QUEUE: ENQUEUE -------------------------
 function enqueueEditEvent_(payload) {
-  const lock = LockService.getDocumentLock(); // именно “по документу”
-  const got = lock.tryLock(EDIT_QUEUE_CFG.ENQUEUE_LOCK_WAIT_MS);
-
-  if (!got) {
-    // Не смогли быстро взять замок на очередь — лучше не зависать в onEdit.
-    // Можно либо “сдаться”, либо попробовать очень короткий второй раз.
-    Logger.log('[QUEUE] enqueue: lock busy, skip enqueue (rare). payload id=' + payload.id);
-    return;
+  const lock = LockService.getDocumentLock();
+  if (!lock.tryLock(EDIT_QUEUE_CFG.ENQUEUE_LOCK_WAIT_MS)) {
+    return false;
   }
 
   try {
     const props = PropertiesService.getDocumentProperties();
+    const key = buildQueueKey_(payload);
+    props.setProperty(key, JSON.stringify(payload));
 
-    // Храним как массив строк JSON (чуть компактнее, чем массив объектов)
-    const current = props.getProperty(EDIT_QUEUE_CFG.QUEUE_PROP_KEY);
-    const arr = current ? JSON.parse(current) : [];
+    const queueKeys = Object.keys(props.getProperties())
+      .filter(keyName => keyName.indexOf(EDIT_QUEUE_CFG.QUEUE_PREFIX) === 0)
+      .sort();
 
-    arr.push(JSON.stringify(payload));
-
-    // защита от переполнения
-    if (arr.length > EDIT_QUEUE_CFG.MAX_QUEUE_LEN) {
-      const overflow = arr.length - EDIT_QUEUE_CFG.MAX_QUEUE_LEN;
-      arr.splice(0, overflow); // выкидываем самые старые
-      Logger.log(`[QUEUE] overflow: dropped ${overflow} oldest events`);
+    const overflow = queueKeys.length - EDIT_QUEUE_CFG.MAX_QUEUE_LEN;
+    if (overflow > 0) {
+      for (let i = 0; i < overflow; i++) {
+        props.deleteProperty(queueKeys[i]);
+      }
+      Logger.log(`[QUEUE] удалено ${overflow} самых старых событий из переполненной очереди.`);
     }
 
-    props.setProperty(EDIT_QUEUE_CFG.QUEUE_PROP_KEY, JSON.stringify(arr));
+    return true;
   } finally {
     lock.releaseLock();
   }
 }
 
-// ------------------------- QUEUE: PROCESSOR -------------------------
-function tryProcessEditQueue_() {
-  const lock = LockService.getDocumentLock();
+function buildQueueKey_(payload) {
+  const timestamp = String(payload.ts || Date.now()).padStart(13, '0');
+  return EDIT_QUEUE_CFG.QUEUE_PREFIX + timestamp + '_' + payload.id;
+}
 
-  // ВАЖНО: здесь именно waitLock/tryLock — чтобы собрать очередь и обработать последовательно.
-  // Если процессор уже работает, просто выходим (очередь будет обработана им).
-  const got = lock.tryLock(EDIT_QUEUE_CFG.PROCESS_LOCK_WAIT_MS);
-  if (!got) {
-    Logger.log('[QUEUE] processor: another processor is running; exit');
+function tryProcessEditQueue_() {
+  const processorLock = LockService.getScriptLock();
+  if (!processorLock.tryLock(EDIT_QUEUE_CFG.PROCESS_LOCK_WAIT_MS)) {
     return;
   }
 
   const startedAt = Date.now();
-
   try {
-    while (true) {
-      // ограничение по времени, чтобы не упереться в лимиты Apps Script
-      if (Date.now() - startedAt > EDIT_QUEUE_CFG.DRAIN_TIME_LIMIT_MS) {
-        Logger.log('[QUEUE] drain: time limit reached; remaining events will be processed by next trigger');
-        return;
-      }
-
+    while (Date.now() - startedAt <= EDIT_QUEUE_CFG.DRAIN_TIME_LIMIT_MS) {
       const next = dequeueOneEvent_();
-      if (!next) {
-        Logger.log('[QUEUE] drain: queue empty');
-        return;
-      }
+      if (!next) return;
 
-      // Обработка строго по одному событию
       try {
-        // Если вашей mainEditLogic нужен sheet-объект — получите его внутри mainEditLogic:
-        // const sheet = SpreadsheetApp.getActive().getSheetByName(payload.sheetName);
         mainEditLogic(next);
-      } catch (err) {
-        Logger.log('[QUEUE] event failed id=' + next.id + ' err=' + (err && err.message ? err.message : err));
-        // Ошибку не “возвращаем” в очередь, иначе можно зациклиться.
+      } catch (error) {
+        Logger.log(`[QUEUE] событие ${next.id || 'unknown'} завершилось ошибкой: ` +
+          (error && error.stack ? error.stack : error));
       }
     }
+
+    Logger.log('[QUEUE] достигнут лимит времени; оставшиеся события обработает следующий запуск.');
+  } finally {
+    processorLock.releaseLock();
+  }
+}
+
+function dequeueOneEvent_() {
+  const lock = LockService.getDocumentLock();
+  if (!lock.tryLock(EDIT_QUEUE_CFG.QUEUE_LOCK_WAIT_MS)) {
+    return null;
+  }
+
+  try {
+    const props = PropertiesService.getDocumentProperties();
+    const allProps = props.getProperties();
+    const queueKeys = Object.keys(allProps)
+      .filter(key => key.indexOf(EDIT_QUEUE_CFG.QUEUE_PREFIX) === 0)
+      .sort();
+
+    while (queueKeys.length > 0) {
+      const key = queueKeys.shift();
+      const raw = allProps[key];
+      props.deleteProperty(key);
+
+      try {
+        return JSON.parse(raw);
+      } catch (error) {
+        Logger.log(`[QUEUE] повреждённое событие ${key} удалено: ${error.message}`);
+      }
+    }
+
+    return null;
   } finally {
     lock.releaseLock();
   }
 }
 
-// ------------------------- QUEUE: DEQUEUE (one) -------------------------
-function dequeueOneEvent_() {
-  // ВНИМАНИЕ: мы уже под PROCESS_LOCK, но всё равно работаем аккуратно.
-  const props = PropertiesService.getDocumentProperties();
-  const current = props.getProperty(EDIT_QUEUE_CFG.QUEUE_PROP_KEY);
-  if (!current) return null;
-
-  const arr = JSON.parse(current);
-  if (!arr.length) return null;
-
-  const firstStr = arr.shift();
-  props.setProperty(EDIT_QUEUE_CFG.QUEUE_PROP_KEY, JSON.stringify(arr));
-
-  try {
-    return JSON.parse(firstStr);
-  } catch (e) {
-    Logger.log('[QUEUE] bad JSON event, skipped');
-    return null;
-  }
+function isTrueEditValue_(value) {
+  return value === true || String(value).toUpperCase() === 'TRUE';
 }
-
-// ------------------------- HELPERS -------------------------
-function safeGetActiveUserEmail_() {
-  try {
-    const email = Session.getActiveUser().getEmail();
-    return email || '';
-  } catch (e) {
-    return '';
-  }
-}
-
 
 function mainEditLogic(eventData) {
-    Logger.log("Триггер сработал, вызвана mainEditLogic.");
-    Logger.log(`mainEditLogic: Входящие данные eventData: ${JSON.stringify(eventData)}`);
+  if (!eventData || !eventData.spreadsheetId || !eventData.sheetName) {
+    throw new Error('mainEditLogic: неполные данные события.');
+  }
 
-    // *** УНИВЕРСАЛЬНОЕ ОПРЕДЕЛЕНИЕ ПЕРЕМЕННЫХ ***
-    const ss = SpreadsheetApp.openById("1XffWoUclgQyFcT4DOIRoenQ9jAbBxXam6YxyY8xgv_4");
-    const sheetName = eventData.sheetName;
-    const row = eventData.row;
-    const col = eventData.column;
-    const val = eventData.value;
-    const a1Notation = eventData.a1Notation;
-    const sourceSheet = eventData.sourceSheet;
+  const ss = SpreadsheetApp.openById(eventData.spreadsheetId);
+  const sheetName = eventData.sheetName;
+  const row = eventData.row;
+  const col = eventData.column;
+  const val = eventData.value;
+  const isTrue = isTrueEditValue_(val);
 
-    const sheet = ss.getSheetByName(sheetName);
-    if (!sheet) {
-        Logger.log(`mainEditLogic: Ошибка: Лист с именем '${sheetName}' не найден.`);
-        ss.toast(`Ошибка: Лист '${sheetName}' не найден.`, "Ошибка", 5);
-        return;
-    }
-    const range = sheet.getRange(a1Notation);
-    if (!range) {
-        Logger.log(`mainEditLogic: Ошибка: Диапазон '${a1Notation}' не найден на листе '${sheetName}'.`);
-        ss.toast(`Ошибка: Диапазон '${a1Notation}' не найден.`, "Ошибка", 5);
-        return;
-    }
-
-    Logger.log(`Зафиксировано изменение на листе ${sheet.getName()} на строке ${row}, в столбце ${col}, новое значение в ячейке ${val}`);
-
-    let notifications = [];
-
-    switch (sheetName) {
-        case "Запуск":
-            if (col === COL_LAUNCH_TRIGGER && val === "TRUE") {
-                Logger.log(`mainEditLogic: Обнаружен триггер запуска в колонке ${col}. Проверяем данные в A и C.`);
-
-                const valueCol1 = sheet.getRange(row, 1);
-                const valueCol3 = sheet.getRange(row, 3);
-
-                if (!valueCol1 || !valueCol3) {
-                    Logger.log("mainEditLogic: Ошибка: Не удалось получить диапазоны для проверки A и C.");
-                    ss.toast("Ошибка при проверке данных. Пожалуйста, попробуйте еще раз.", "Ошибка", 5);
-                    return;
-                }
-
-                if (
-                    valueCol1.getValue().toString().trim() !== "" &&
-                    valueCol3.getValue().toString().trim() !== ""
-                ) {
-                    Logger.log(`mainEditLogic: Данные в A (${valueCol1.getValue()}) и C (${valueCol3.getValue()}) найдены. Вызываем handleLaunchEdit.`);
-                    handleLaunchEdit(ss, sheet, row);
-                    //var templateRow = sheet.getLastRow();
-                    //testEnsureFreeRows();
-                    //ensureFreeRows(sheet, 18, 50);
-                    notifications.push("Изделие добавлено в базу");
-                    
-                } else {
-                    Logger.log("mainEditLogic: Недостаточно данных в колонках A или C для внесения изделия.");
-                    SpreadsheetApp.getUi().alert("Недостаточно данных для внесения изделия в базу данных Диспетчера");
-                    sheet.getRange(row, COL_LAUNCH_TRIGGER).setValue(false); // Сбросить чекбокс обратно
-                }
-            }
-            break;
-
-        case "Проектирование":
-            if (col === COL_ITEMNAME || col === COL_NOTE || col === COL_QUANTITY) {
-                Logger.log("Запуск обработки примечания");
-                handleNote(ss, sheet, range, row, col, val);
-            }
-            if (col === COL_CHECKBOX && val === "TRUE") {
-                const itemId = handleNewSheetEdit(ss, sheet, row, col, val);
-                Logger.log("Зафиксировано нажатие на чекбокс на странице Проектирование. Идентификатор изделия: " + itemId);
-                fillCheckboxes(ss, itemId);
-                sheet.getRange(row, col).setValue(false); // Сброс чекбокса после обработки
-            }
-            break;
-
-        case "Техконтроль":
-            if (col === COL_ITEMNAME || col === COL_NOTE || col === COL_QUANTITY) {
-                Logger.log("Запуск обработки примечания");
-                handleNote(ss, sheet, range, row, col, val);
-            }
-            if (col === COL_CHECKBOX && val === "TRUE") {
-                const itemId = handleNewSheetEdit(ss, sheet, row, col, val);
-                Logger.log("Зафиксировано нажатие на чекбокс на странице Техконтроль. Идентификатор изделия: " + itemId);
-                fillCheckboxes(ss, itemId);
-                sheet.getRange(row, col).setValue(false); // Сброс чекбокса после обработки
-            }
-            if (col === COL_RETURN_CHECKBOX && val === "TRUE") {
-                handleReturn(ss, sheet, range, row, COL_DESIGN);
-            }
-            break;    
-
-        case "Развертывание спецификации":
-            if (col === COL_ITEMNAME || col === COL_NOTE || col === COL_QUANTITY) {
-                Logger.log("Запуск обработки примечания");
-                handleNote(ss, sheet, range, row, col, val);
-            }
-            if (col === COL_CHECKBOX && val === "TRUE") {
-                const currentItemName = sheet.getRange(row, COL_ITEMNAME).getValue();
-                const currentItemUUID = sheet.getRange(row, COL_UUID).getValue();
-                const currentInitialQuantity = sheet.getRange(row, COL_QUANTITY).getValue();
-
-                Logger.log(`Развертывание спецификации: Чекбокс TRUE. Извлечено: itemName="${currentItemName}", itemUUID="${currentItemUUID}", initialQuantity="${currentInitialQuantity}"`);
-
-                const baseSheet = ss.getSheetByName("База");
-                if (!baseSheet) {
-                    Logger.log(`mainEditLogic: Ошибка: Лист "База" не найден для развертывания спецификации.`);
-                    ss.toast(`Ошибка: Лист "База" не найден.`, "Ошибка", 5);
-                    return;
-                }
-
-                const itemId = handleDeployment(currentItemUUID, currentItemName, ss, baseSheet, row, currentInitialQuantity);
-                //fillCheckboxes(ss, itemId);
-                // *** ИСПРАВЛЕНИЕ: Сброс чекбокса после успешного развертывания ***
-                sourceSheet.getRange(row, col).setValue(false); 
-            }
-            if (col === COL_RETURN_CHECKBOX && val === "TRUE") {
-                handleReturn(ss, sheet, range, row, COL_TECHNICAL_CONTROL);
-            }
-            break;
-
-        case "Технолог":
-            if (col === COL_ITEMNAME || col === COL_NOTE || col === COL_QUANTITY) {
-                Logger.log("Запуск обработки примечания");
-                handleNote(ss, sheet, range, row, col, val);
-            }
-            if (col === COL_CHECKBOX && val === "TRUE") {
-                const itemId = handleNewSheetEdit(ss, sheet, row, col, val);
-                fillCheckboxes(ss, itemId);
-                sheet.getRange(row, col).setValue(false); // Сброс чекбокса после обработки
-            }
-            if (col === COL_RETURN_CHECKBOX && val === "TRUE") {
-                handleReturn(ss, sheet, range, row, COL_DEPLOYMENT);
-            }
-            break;
-
-        case "Проверка технологии":
-            if (col === COL_NOTE) {
-                Logger.log("Запуск обработки примечания");
-                handleNote(ss, sheet, range, row, col, val);
-            }
-            if (col === COL_CHECKBOX && val === "TRUE") {
-                const itemId = handleNewSheetEdit(ss, sheet, row, col, val);
-                fillCheckboxes(ss, itemId);
-                sheet.getRange(row, col).setValue(false); // Сброс чекбокса после обработки
-            }
-            if (col === COL_RETURN_CHECKBOX && val === "TRUE") {
-                handleReturn(ss, sheet, range, row, COL_TECHNOLOGIEST);
-            }
-            break;
-
-        case "Диспетчер- комплектовщик":
-            if (col === COL_ITEMNAME || col === COL_NOTE || col === COL_QUANTITY) {
-                Logger.log("Запуск обработки примечания");
-                handleNote(ss, sheet, range, row, col, val);
-            }
-            if (col === COL_CHECKBOX && val === "TRUE") {
-                Logger.log("зафиксировано нажатие на чекбокс на листе Диспетчер-комплектовщик");
-                const itemId = handleSupplyOrder(ss, sheet, range, row);
-                Logger.log("Выполнена обработка нажатия чекбокса, получен идентификатор изделия: " + itemId);
-                fillCheckboxes(ss, itemId);
-                sheet.getRange(row, col).setValue(false); // Сброс чекбокса после обработки
-            }
-            if (col === COL_RETURN_CHECKBOX && val === "TRUE") {
-                handleReturn(ss, sheet, range, row, COL_TECHNOLOGY_CHECK);
-            }
-            break;
-
-        case "Комплектация":
-            if (col === COL_ITEMNAME || col === COL_NOTE || col === COL_QUANTITY || col === COL_DESTINATION) {
-                Logger.log("Запуск обработки примечания");
-                handleNote(ss, sheet, range, row, col, val);
-            }
-            if (col === COL_CHECKBOX && val === "TRUE") {
-                const itemId = handlePickingOrder(ss, sheet, range, row);
-                fillCheckboxes(ss, itemId);
-                sheet.getRange(row, col).setValue(false); // Сброс чекбокса после обработки
-            }
-            if (col === COL_RETURN_CHECKBOX && val === "TRUE") {
-                handleReturn(ss, sheet, range, row, COL_PICKER);
-            }
-            break;
-
-        case "Склад":
-            if (col === COL_NOTE) {
-                Logger.log("Запуск обработки примечания");
-                handleNote(ss, sheet, range, row, col, val);
-            }
-            if (col === COL_CHECKBOX && val === "TRUE") {
-                const itemId = handleStock(ss, sheet, range, row);
-                fillCheckboxes(ss, itemId);
-                sheet.getRange(row, col).setValue(false); // Сброс чекбокса после обработки
-            }
-            if (col === COL_RETURN_CHECKBOX && val === "TRUE") {
-                handleReturn(ss, sheet, range, row, COL_PICKING);
-            }
-            break;
-
-        case "Склад производства":
-            if (col === COL_NOTE) {
-                Logger.log("Запуск обработки примечания");
-                handleNote(ss, sheet, range, row, col, val);
-            }
-            if (col === COL_CHECKBOX && val === "TRUE") {
-                const itemId = handleProductionStock(ss, sheet, range, row);
-                fillCheckboxes(ss, itemId);
-                sheet.getRange(row, col).setValue(false); // Сброс чекбокса после обработки
-            }
-            if (col === COL_RETURN_CHECKBOX && val === "TRUE") {
-                handleReturn(ss, sheet, range, row, COL_STOCK);
-            }
-            break;
-
-        case "Производство":
-            if (col === COL_NOTE) {
-                Logger.log("Запуск обработки примечания");
-                handleNote(ss, sheet, range, row, col, val);
-            }
-            if (col === COL_CHECKBOX && val === "TRUE") {
-                const itemId = handleProduction(ss, sheet, range, row);
-                fillCheckboxes(ss, itemId);
-                sheet.getRange(row, col).setValue(false); // Сброс чекбокса после обработки
-            }
-            if (col === COL_RETURN_CHECKBOX && val === "TRUE") {
-                handleReturn(ss, sheet, range, row, COL_PRODUCTION_STOCK);
-            }
-            break;
-
-        case "ОТК":
-            if (col === COL_NOTE) {
-                Logger.log("Запуск обработки примечания");
-                handleNote(ss, sheet, range, row, col, val);
-            }
-            if (col === COL_CHECKBOX && val === "TRUE") {
-                const itemId = handleNewSheetEdit(ss, sheet, row, col, val);
-                fillCheckboxes(ss, itemId);
-                sheet.getRange(row, col).setValue(false); // Сброс чекбокса после обработки
-            }
-            if (col === COL_RETURN_CHECKBOX && val === "TRUE") {
-                handleReturn(ss, sheet, range, row, COL_PRODUCTION);
-            }
-            break;
-
-        case "Приемка":
-            if (col === COL_NOTE || col === COL_QUANTITY) {
-                Logger.log("Запуск обработки примечания");
-                handleNote(ss, sheet, range, row, col, val);
-            }
-            if (col === COL_CHECKBOX && val === "TRUE") {
-                const itemId = handleAcceptance(ss, sheet, range, row);
-                fillCheckboxes(ss, itemId);
-                sheet.getRange(row, col).setValue(false); // Сброс чекбокса после обработки
-            }
-            if (col === COL_RETURN_CHECKBOX && val === "TRUE") {
-                handleReturn(ss, sheet, range, row, COL_QUALITY_CHECK);
-            }
-            break;
-
-        case "Готово":
-            if (col === COL_NOTE) {
-                Logger.log("Запуск обработки примечания");
-                handleNote(ss, sheet, range, row, col, val);
-            }
-            if (col === COL_CHECKBOX && val === "TRUE") {
-                const itemId = handleReady(ss, sheet, range, row);
-                fillCheckboxes(ss, itemId);
-                sheet.getRange(row, col).setValue(false); // Сброс чекбокса после обработки
-            }
-            if (col === COL_RETURN_CHECKBOX && val === "TRUE") {
-                handleReturn(ss, sheet, range, row, COL_ACCEPTANCE);
-            }
-            break;
-
-        case "База":
-            switch (col) {
-                case COL_DEPLOYMENT:
-                    Logger.log(`База, столбец N: Значение чекбокса (val): ${val}, Тип: ${typeof val}`);
-
-                    let booleanVal;
-                    if (typeof val === 'string') {
-                        booleanVal = (val.toUpperCase() === 'TRUE');
-                    } else {
-                        booleanVal = val;
-                    }
-
-                    const baseSheet = sheet;
-                    const itemName = baseSheet.getRange(row, COL_ITEMNAME).getValue();
-                    const itemUUID = baseSheet.getRange(row, COL_UUID).getValue();
-                    const initialQuantity = baseSheet.getRange(row, COL_QUANTITY).getValue();
-
-                    Logger.log(`База, столбец N: Извлечено: itemName="${itemName}", itemUUID="${itemUUID}", initialQuantity="${initialQuantity}"`);
-
-                    if (booleanVal === true) {
-                        handleDeployment(itemUUID, itemName, ss, baseSheet, row, initialQuantity);
-                        // На листе "База" чекбокс также нужно сбросить, если он используется как триггер
-                        //baseSheet.getRange(row, col).setValue(false); 
-                        //baseSheet.getRange(row, col).setValue(false); 
-                    } else if (booleanVal === false) {
-                        Logger.log("Запуск сворачивания спецификации");
-                        handleUndeployment(ss, baseSheet, row);
-                    }
-                    break;
-                case COL_PICKER:
-                    if (val === "TRUE") {
-                        handleSupplyOrder(ss, sheet, range, row);
-                        sheet.getRange(row, col).setValue(false); // Сброс чекбокса
-                    }
-                    break;
-                case COL_STOCK:
-                    if (val === "TRUE") {
-                        handleStock(ss, sheet, range, row);
-                        sheet.getRange(row, col).setValue(false); // Сброс чекбокса
-                    }
-                    break;
-                case COL_PRODUCTION_STOCK:
-                    if (val === "TRUE") {
-                        handleProductionStock(ss, sheet, range, row);
-                        sheet.getRange(row, col).setValue(false); // Сброс чекбокса
-                    }
-                    break;
-                case COL_ACCEPTANCE:
-                    if (val === "TRUE") {
-                        //handleAcceptance(ss, sheet, range, row);
-                        ss.toast("Для выполенния приемки перейдите на соответствующий лист", "Ошибка", 5);
-                        sheet.getRange(row, COL_ACCEPTANCE).setValue(false); // Сброс чекбокса
-                    }
-                    break;
-                case COL_READY:
-                    if (val === "TRUE") {
-                        handleReady(ss, sheet, range, row);
-                        sheet.getRange(row, col).setValue(false); // Сброс чекбокса
-                    }
-                    break;
-                default:
-                    // Общий сброс чекбокса для других столбцов на листе "База", если они триггерят что-то и должны сбрасываться.
-                    // Если вы хотите, чтобы `checkboxOk` просто "одобрил" чекбокс, но не сбрасывал его,
-                    // то эту строку нужно будет убрать или обернуть в условие.
-                    if (val === "TRUE") {
-                        checkboxOk(range);
-                        // sheet.getRange(row, col).setValue(false); // Возможно, здесь тоже нужен сброс?
-                    }
-                    break;
-            }
-            break;
-
-        default:
-            handleNewSheetEdit(ss, sheet, row, col, val);
-            // Если handleNewSheetEdit также вызывает перемещение строки, то здесь тоже нужен сброс.
-            // Однако, по логике, это, возможно, чекбоксы, которые просто "заполняются" и не перемещают строку.
-            // Если это не так, добавьте: sheet.getRange(row, col).setValue(false);
-            break;
-    }
-
-    notifications.forEach(message => {
-        ss.toast(message, "Информация", 5);
-    });
-}
-
-
-
-
-/**
- * Объединённый обработчик для новых листов.
- * Эта функция вызывается, если редактирование произошло на листе, которое настроено в "Настройки" 
- * (то есть, имя листа присутствует в настройках) и если редактирование произошло в столбце K (номер 11).
- * Она считывает настройки, находит нужную строку в "База" по идентификатору и устанавливает отметку в указанном столбце,
- * а затем сбрасывает исходный чекбокс.
- *
- * @param {Event} e - Объект события onEdit.
- */
-function handleNewSheetEdit(ss, sheet, row, col, val) {
-  const sheetName = sheet.getName();
-    // Проверяем, что редактирование произошло в столбце K (номер 11) и значение = "TRUE"
-  if (col !== 11 || val !== "TRUE") return;
-
-  // Получаем настройки из листа "Настройки"
-  const settingsSheet = ss.getSheetByName("Настройки");
-  if (!settingsSheet) {
-    Logger.log(`[${new Date().toLocaleString()}] Лист "Настройки" не найден.`);
+  const sheet = ss.getSheetByName(sheetName);
+  if (!sheet) {
+    Logger.log(`mainEditLogic: лист «${sheetName}» не найден.`);
     return;
   }
-  
-  // Считываем весь диапазон настроек и строим объект-отображение:
-  // Ключ: имя листа, Значение: номер столбца (полученный из буквенного обозначения)
-  const settingsData = settingsSheet.getDataRange().getValues();
-  const sheetToBaseColumn = {};
-  for (let i = 1; i < settingsData.length; i++) { // начинаем со второй строки (первая — заголовок)
-    let currentSheetName = settingsData[i][0].toString().trim();
-    let baseColumnLetter = settingsData[i][1].toString().trim().toUpperCase();
-    if (currentSheetName && baseColumnLetter) {
-      sheetToBaseColumn[currentSheetName] = columnLetterToNumber(baseColumnLetter);
-    }
-  }
-  
-  // Если имя текущего листа присутствует в настройках, выполняем обработку
-  if (sheetToBaseColumn.hasOwnProperty(sheetName)) {
-    // Считываем уникальный идентификатор изделия из столбца D (номер 4) текущего листа
-    const itemId = sheet.getRange(row, COL_UUID).getValue().toString().trim();
-    // Считываем название изделия из столбца E (номер 5)
-    const itemName = sheet.getRange(row, COL_ITEMNAME).getValue().toString().trim();
-    Logger.log(`[${new Date().toLocaleString()}] Новая листовая отметка, строка ${row}, изделие: "${itemName}"`);
-    
-    if (!itemId) {
-      Logger.log(`[${new Date().toLocaleString()}] Идентификатор изделия отсутствует в строке ${row}, столбец D.`);
-      sheet.getRange(row, 11).setValue(false);
-      return;
-    }
-    
-    // Получаем лист "База"
-    const baseSheet = ss.getSheetByName("База");
-    if (!baseSheet) {
-      Logger.log(`[${new Date().toLocaleString()}] Лист "База" не найден.`);
-      return;
-    }
-    
-    // Ищем строку в "База", где в столбце D (COL_UUID) совпадает itemId
-    const baseRow = findRowById(baseSheet, itemId);
-    if (baseRow) {
-      // Из объекта настроек получаем номер столбца, в котором необходимо установить отметку на "База"
-      const baseColumn = sheetToBaseColumn[sheetName];
-      // Устанавливаем отметку (чекбокс) на листе "База"
-      checkboxOk(baseSheet.getRange(baseRow, baseColumn));
-      // Сбрасываем исходный чекбокс на текущем листе
-      sheet.getRange(row, 11).setValue(false);
-      Logger.log(`[${new Date().toLocaleString()}] Отметка для "${itemName}" обновлена на листе "База" в столбце ${baseColumn}.`);
-    } else {
-      Logger.log(`[${new Date().toLocaleString()}] Изделие "${itemName}" не найдено на листе "База".`);
-    }
-  return itemId;
-  }
 
+  const range = sheet.getRange(row, col);
+
+  switch (sheetName) {
+    case 'Запуск': {
+      if (col !== COL_LAUNCH_TRIGGER || !isTrue) break;
+
+      const launchData = sheet.getRange(row, 1, 1, 3).getValues()[0];
+      const itemName = String(launchData[0] ?? '').trim();
+      const quantity = String(launchData[2] ?? '').trim();
+
+      if (!itemName || !quantity) {
+        ss.toast('Недостаточно данных для внесения изделия в базу данных Диспетчера', 'Ошибка', 5);
+        range.setValue(false);
+        return;
+      }
+
+      handleLaunchEdit(ss, sheet, row);
+      ss.toast('Изделие добавлено в базу', 'Информация', 5);
+      break;
+    }
+
+    case 'Проектирование':
+      if (col === COL_ITEMNAME || col === COL_NOTE || col === COL_QUANTITY) {
+        handleNote(ss, sheet, range, row, col, val);
+      }
+      if (col === COL_CHECKBOX && isTrue) {
+        const itemId = handleNewSheetEdit(ss, sheet, row, col, val);
+        if (itemId) fillCheckboxes(ss, itemId);
+        range.setValue(false);
+      }
+      break;
+
+    case 'Техконтроль':
+      if (col === COL_ITEMNAME || col === COL_NOTE || col === COL_QUANTITY) {
+        handleNote(ss, sheet, range, row, col, val);
+      }
+      if (col === COL_CHECKBOX && isTrue) {
+        const itemId = handleNewSheetEdit(ss, sheet, row, col, val);
+        if (itemId) fillCheckboxes(ss, itemId);
+        range.setValue(false);
+      }
+      if (col === COL_RETURN_CHECKBOX && isTrue) {
+        handleReturn(ss, sheet, range, row, COL_DESIGN);
+      }
+      break;
+
+    case 'Развертывание спецификации':
+      if (col === COL_ITEMNAME || col === COL_NOTE || col === COL_QUANTITY) {
+        handleNote(ss, sheet, range, row, col, val);
+      }
+      if (col === COL_CHECKBOX && isTrue) {
+        const rowData = sheet.getRange(row, COL_UUID, 1, COL_QUANTITY - COL_UUID + 1).getValues()[0];
+        const itemUUID = String(rowData[0] ?? '').trim();
+        const itemName = String(rowData[COL_ITEMNAME - COL_UUID] ?? '').trim();
+        const initialQuantity = rowData[COL_QUANTITY - COL_UUID];
+        const baseSheet = ss.getSheetByName('База');
+
+        if (!baseSheet) throw new Error('Лист «База» не найден.');
+        handleDeployment(itemUUID, itemName, ss, baseSheet, row, initialQuantity);
+        range.setValue(false);
+      }
+      if (col === COL_RETURN_CHECKBOX && isTrue) {
+        handleReturn(ss, sheet, range, row, COL_TECHNICAL_CONTROL);
+      }
+      break;
+
+    case 'Технолог':
+      if (col === COL_ITEMNAME || col === COL_NOTE || col === COL_QUANTITY) {
+        handleNote(ss, sheet, range, row, col, val);
+      }
+      if (col === COL_CHECKBOX && isTrue) {
+        const itemId = handleNewSheetEdit(ss, sheet, row, col, val);
+        if (itemId) fillCheckboxes(ss, itemId);
+        range.setValue(false);
+      }
+      if (col === COL_RETURN_CHECKBOX && isTrue) {
+        handleReturn(ss, sheet, range, row, COL_DEPLOYMENT);
+      }
+      break;
+
+    case 'Проверка технологии':
+      if (col === COL_NOTE) {
+        handleNote(ss, sheet, range, row, col, val);
+      }
+      if (col === COL_CHECKBOX && isTrue) {
+        const itemId = handleNewSheetEdit(ss, sheet, row, col, val);
+        if (itemId) fillCheckboxes(ss, itemId);
+        range.setValue(false);
+      }
+      if (col === COL_RETURN_CHECKBOX && isTrue) {
+        handleReturn(ss, sheet, range, row, COL_TECHNOLOGIEST);
+      }
+      break;
+
+    case 'Диспетчер- комплектовщик':
+      if (col === COL_ITEMNAME || col === COL_NOTE || col === COL_QUANTITY) {
+        handleNote(ss, sheet, range, row, col, val);
+      }
+      if (col === COL_CHECKBOX && isTrue) {
+        const itemId = handleSupplyOrder(ss, sheet, range, row);
+        if (itemId) fillCheckboxes(ss, itemId);
+        range.setValue(false);
+      }
+      if (col === COL_RETURN_CHECKBOX && isTrue) {
+        handleReturn(ss, sheet, range, row, COL_TECHNOLOGY_CHECK);
+      }
+      break;
+
+    case 'Комплектация':
+      if (col === COL_ITEMNAME || col === COL_NOTE || col === COL_QUANTITY || col === COL_DESTINATION) {
+        handleNote(ss, sheet, range, row, col, val);
+      }
+      if (col === COL_CHECKBOX && isTrue) {
+        const itemId = handlePickingOrder(ss, sheet, range, row);
+        if (itemId) fillCheckboxes(ss, itemId);
+        range.setValue(false);
+      }
+      if (col === COL_RETURN_CHECKBOX && isTrue) {
+        handleReturn(ss, sheet, range, row, COL_PICKER);
+      }
+      break;
+
+    case 'Склад':
+      if (col === COL_NOTE) {
+        handleNote(ss, sheet, range, row, col, val);
+      }
+      if (col === COL_CHECKBOX && isTrue) {
+        const itemId = handleStock(ss, sheet, range, row);
+        if (itemId) fillCheckboxes(ss, itemId);
+        range.setValue(false);
+      }
+      if (col === COL_RETURN_CHECKBOX && isTrue) {
+        handleReturn(ss, sheet, range, row, COL_PICKING);
+      }
+      break;
+
+    case 'Склад производства':
+      if (col === COL_NOTE) {
+        handleNote(ss, sheet, range, row, col, val);
+      }
+      if (col === COL_CHECKBOX && isTrue) {
+        const itemId = handleProductionStock(ss, sheet, range, row);
+        if (itemId) fillCheckboxes(ss, itemId);
+        range.setValue(false);
+      }
+      if (col === COL_RETURN_CHECKBOX && isTrue) {
+        handleReturn(ss, sheet, range, row, COL_STOCK);
+      }
+      break;
+
+    case 'Производство':
+      if (col === COL_NOTE) {
+        handleNote(ss, sheet, range, row, col, val);
+      }
+      if (col === COL_CHECKBOX && isTrue) {
+        const itemId = handleProduction(ss, sheet, range, row);
+        if (itemId) fillCheckboxes(ss, itemId);
+        range.setValue(false);
+      }
+      if (col === COL_RETURN_CHECKBOX && isTrue) {
+        handleReturn(ss, sheet, range, row, COL_PRODUCTION_STOCK);
+      }
+      break;
+
+    case 'ОТК':
+      if (col === COL_NOTE) {
+        handleNote(ss, sheet, range, row, col, val);
+      }
+      if (col === COL_CHECKBOX && isTrue) {
+        const itemId = handleNewSheetEdit(ss, sheet, row, col, val);
+        if (itemId) fillCheckboxes(ss, itemId);
+        range.setValue(false);
+      }
+      if (col === COL_RETURN_CHECKBOX && isTrue) {
+        handleReturn(ss, sheet, range, row, COL_PRODUCTION);
+      }
+      break;
+
+    case 'Приемка':
+      if (col === COL_NOTE || col === COL_QUANTITY) {
+        handleNote(ss, sheet, range, row, col, val);
+      }
+      if (col === COL_CHECKBOX && isTrue) {
+        const itemId = handleAcceptance(ss, sheet, range, row);
+        if (itemId) fillCheckboxes(ss, itemId);
+        range.setValue(false);
+      }
+      if (col === COL_RETURN_CHECKBOX && isTrue) {
+        handleReturn(ss, sheet, range, row, COL_QUALITY_CHECK);
+      }
+      break;
+
+    case 'Готово':
+      if (col === COL_NOTE) {
+        handleNote(ss, sheet, range, row, col, val);
+      }
+      if (col === COL_CHECKBOX && isTrue) {
+        const itemId = handleReady(ss, sheet, range, row);
+        if (itemId) fillCheckboxes(ss, itemId);
+        range.setValue(false);
+      }
+      if (col === COL_RETURN_CHECKBOX && isTrue) {
+        handleReturn(ss, sheet, range, row, COL_ACCEPTANCE);
+      }
+      break;
+
+    case 'База':
+      handleBaseEdit_(ss, sheet, range, row, col, val, isTrue);
+      break;
+
+    default:
+      handleNewSheetEdit(ss, sheet, row, col, val);
+      break;
+  }
 }
 
+function handleBaseEdit_(ss, sheet, range, row, col, val, isTrue) {
+  switch (col) {
+    case COL_DEPLOYMENT: {
+      const booleanVal = (typeof val === 'string') ? val.toUpperCase() === 'TRUE' : Boolean(val);
+      const rowData = sheet.getRange(row, COL_UUID, 1, COL_QUANTITY - COL_UUID + 1).getValues()[0];
+      const itemUUID = String(rowData[0] ?? '').trim();
+      const itemName = String(rowData[COL_ITEMNAME - COL_UUID] ?? '').trim();
+      const initialQuantity = rowData[COL_QUANTITY - COL_UUID];
 
+      if (booleanVal) {
+        handleDeployment(itemUUID, itemName, ss, sheet, row, initialQuantity);
+      } else {
+        handleUndeployment(ss, sheet, row);
+      }
+      break;
+    }
 
+    case COL_PICKER:
+      if (isTrue) {
+        handleSupplyOrder(ss, sheet, range, row);
+        range.setValue(false);
+      }
+      break;
+
+    case COL_STOCK:
+      if (isTrue) {
+        handleStock(ss, sheet, range, row);
+        range.setValue(false);
+      }
+      break;
+
+    case COL_PRODUCTION_STOCK:
+      if (isTrue) {
+        handleProductionStock(ss, sheet, range, row);
+        range.setValue(false);
+      }
+      break;
+
+    case COL_ACCEPTANCE:
+      if (isTrue) {
+        ss.toast('Для выполнения приемки перейдите на соответствующий лист', 'Ошибка', 5);
+        range.setValue(false);
+      }
+      break;
+
+    case COL_READY:
+      if (isTrue) {
+        handleReady(ss, sheet, range, row);
+        range.setValue(false);
+      }
+      break;
+
+    default:
+      if (isTrue) checkboxOk(range);
+  }
+}
+
+/**
+ * Универсальный обработчик отметки на листе роли.
+ * Настройки листов читаются один раз за execution и повторно используются всеми
+ * событиями, которые процессор очереди успевает обработать за один запуск.
+ */
+function handleNewSheetEdit(ss, sheet, row, col, val) {
+  if (col !== COL_CHECKBOX || !isTrueEditValue_(val)) return null;
+
+  const sheetName = sheet.getName();
+  const sheetToBaseColumn = getSheetToBaseColumnMap_(ss);
+  const baseColumn = sheetToBaseColumn.get(sheetName);
+  if (!baseColumn) return null;
+
+  const rowData = sheet.getRange(row, COL_UUID, 1, COL_ITEMNAME - COL_UUID + 1).getValues()[0];
+  const itemId = String(rowData[0] ?? '').trim();
+  const itemName = String(rowData[COL_ITEMNAME - COL_UUID] ?? '').trim();
+
+  if (!itemId) {
+    sheet.getRange(row, COL_CHECKBOX).setValue(false);
+    Logger.log(`handleNewSheetEdit: отсутствует UUID для «${itemName}», строка ${row}.`);
+    return null;
+  }
+
+  const baseSheet = ss.getSheetByName('База');
+  if (!baseSheet) throw new Error('Лист «База» не найден.');
+
+  const baseRow = findRowById(baseSheet, itemId);
+  if (!baseRow) {
+    Logger.log(`handleNewSheetEdit: UUID ${itemId} не найден в «База».`);
+    return null;
+  }
+
+  checkboxOk(baseSheet.getRange(baseRow, baseColumn));
+  sheet.getRange(row, COL_CHECKBOX).setValue(false);
+  return itemId;
+}
+
+function getSheetToBaseColumnMap_(ss) {
+  const spreadsheetId = ss.getId();
+  if (_sheetToBaseColumnMaps.has(spreadsheetId)) {
+    return _sheetToBaseColumnMaps.get(spreadsheetId);
+  }
+
+  const result = new Map();
+  const settingsSheet = ss.getSheetByName('Настройки');
+  if (!settingsSheet) {
+    _sheetToBaseColumnMaps.set(spreadsheetId, result);
+    return result;
+  }
+
+  const lastRow = settingsSheet.getLastRow();
+  if (lastRow >= 2) {
+    const settingsData = settingsSheet.getRange(2, 1, lastRow - 1, 2).getValues();
+    for (const row of settingsData) {
+      const currentSheetName = String(row[0] ?? '').trim();
+      const baseColumnLetter = String(row[1] ?? '').trim().toUpperCase();
+      if (currentSheetName && baseColumnLetter) {
+        result.set(currentSheetName, columnLetterToNumber(baseColumnLetter));
+      }
+    }
+  }
+
+  _sheetToBaseColumnMaps.set(spreadsheetId, result);
+  return result;
+}
