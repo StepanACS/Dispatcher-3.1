@@ -30,7 +30,11 @@ function handleReady(ss, sheet, range, row) {
     .setValues([[now, now]]);
 
   const rowData = baseSheet.getRange(baseRow, 1, 1, COL_FACT_QTY).getValues()[0];
-  closeTrelloCard(rowData[COL_TRELLO_ID - 1]);
+  const trelloId = rowData[COL_TRELLO_ID - 1];
+  const trelloClosed = closeTrelloCard(trelloId);
+  if (trelloId && !trelloClosed) {
+    ss.toast('Не удалось архивировать карточку Trello. Проверьте её вручную.', 'Внимание', 8);
+  }
 
   const price = fetchPrice_(itemName);
   const archiveRow = archiveSheet.getLastRow() + 1;
