@@ -1,17 +1,20 @@
 /**
  * Основной обработчик редактирования.
  *
- * onEdit выполняет короткую постановку события в очередь. DocumentLock защищает
- * только операции с очередью; длительная бизнес-логика выполняется без него,
- * поэтому параллельные редактирования могут продолжать добавлять события.
+ * onEdit выполняет короткую постановку события в FIFO-очередь. DocumentLock
+ * защищает только head/tail и одну запись очереди; длительная бизнес-логика
+ * выполняется без DocumentLock, поэтому параллельные редактирования могут быстро
+ * добавлять новые события.
  */
 
 const EDIT_QUEUE_CFG = {
-  QUEUE_PREFIX: 'EDIT_QUEUE_V2_',
+  EVENT_PREFIX: 'EDIT_QUEUE_V2_EVENT_',
+  HEAD_KEY: 'EDIT_QUEUE_V2_HEAD',
+  TAIL_KEY: 'EDIT_QUEUE_V2_TAIL',
   MAX_QUEUE_LEN: 300,
   ENQUEUE_LOCK_WAIT_MS: 5000,
   QUEUE_LOCK_WAIT_MS: 5000,
-  PROCESS_LOCK_WAIT_MS: 50,
+  PROCESS_LOCK_WAIT_MS: 500,
   DRAIN_TIME_LIMIT_MS: 240000
 };
 
@@ -118,35 +121,48 @@ function onEditHandler(e) {
   }
 }
 
+function queuePosition_(props, key, fallback) {
+  const value = Number(props.getProperty(key));
+  return Number.isSafeInteger(value) && value >= 0 ? value : fallback;
+}
+
+function queueEventKey_(position) {
+  return EDIT_QUEUE_CFG.EVENT_PREFIX + String(position).padStart(12, '0');
+}
+
+/** Ставит одно событие в FIFO за O(1), не перечитывая остальные payload. */
 function enqueueEditEvent_(payload) {
   const lock = LockService.getDocumentLock();
-  if (!lock.tryLock(EDIT_QUEUE_CFG.ENQUEUE_LOCK_WAIT_MS)) return false;
+  if (!lock || !lock.tryLock(EDIT_QUEUE_CFG.ENQUEUE_LOCK_WAIT_MS)) return false;
 
   try {
     const props = PropertiesService.getDocumentProperties();
-    props.setProperty(buildQueueKey_(payload), JSON.stringify(payload));
+    let head = queuePosition_(props, EDIT_QUEUE_CFG.HEAD_KEY, 1);
+    let tail = queuePosition_(props, EDIT_QUEUE_CFG.TAIL_KEY, 0);
 
-    const queueKeys = getQueuedEventKeys_(props);
-    const overflow = queueKeys.length - EDIT_QUEUE_CFG.MAX_QUEUE_LEN;
-    if (overflow > 0) {
-      for (let i = 0; i < overflow; i++) props.deleteProperty(queueKeys[i]);
-      Logger.log(`[QUEUE] удалено ${overflow} самых старых событий из переполненной очереди.`);
+    if (head < 1 || tail < head - 1) {
+      head = 1;
+      tail = 0;
     }
+
+    tail += 1;
+    props.setProperty(queueEventKey_(tail), JSON.stringify(payload));
+
+    // При переполнении удаляем самые старые записи. В штатном режиме за один
+    // enqueue удаляется максимум одна запись.
+    while (tail - head + 1 > EDIT_QUEUE_CFG.MAX_QUEUE_LEN) {
+      props.deleteProperty(queueEventKey_(head));
+      head += 1;
+    }
+
+    props.setProperties({
+      [EDIT_QUEUE_CFG.HEAD_KEY]: String(head),
+      [EDIT_QUEUE_CFG.TAIL_KEY]: String(tail)
+    });
     return true;
   } finally {
     lock.releaseLock();
   }
-}
-
-function buildQueueKey_(payload) {
-  const timestamp = String(payload.ts || Date.now()).padStart(13, '0');
-  return EDIT_QUEUE_CFG.QUEUE_PREFIX + timestamp + '_' + payload.id;
-}
-
-function getQueuedEventKeys_(props) {
-  return Object.keys(props.getProperties())
-    .filter(key => key.indexOf(EDIT_QUEUE_CFG.QUEUE_PREFIX) === 0)
-    .sort();
 }
 
 function tryProcessEditQueue_() {
@@ -168,30 +184,58 @@ function tryProcessEditQueue_() {
     }
     Logger.log('[QUEUE] достигнут лимит времени; оставшиеся события будут обработаны следующим запуском.');
   } finally {
+    // Google рекомендует зафиксировать отложенные spreadsheet-изменения до
+    // освобождения lock, если lock сериализует операции с таблицей.
+    SpreadsheetApp.flush();
     processorLock.releaseLock();
   }
 }
 
+/** Снимает одно событие FIFO за O(1). Повреждённые/пропавшие записи пропускает. */
 function dequeueOneEvent_() {
   const lock = LockService.getDocumentLock();
-  if (!lock.tryLock(EDIT_QUEUE_CFG.QUEUE_LOCK_WAIT_MS)) return null;
+  if (!lock || !lock.tryLock(EDIT_QUEUE_CFG.QUEUE_LOCK_WAIT_MS)) return null;
 
   try {
     const props = PropertiesService.getDocumentProperties();
-    const allProps = props.getProperties();
-    const queueKeys = Object.keys(allProps)
-      .filter(key => key.indexOf(EDIT_QUEUE_CFG.QUEUE_PREFIX) === 0)
-      .sort();
+    let head = queuePosition_(props, EDIT_QUEUE_CFG.HEAD_KEY, 1);
+    let tail = queuePosition_(props, EDIT_QUEUE_CFG.TAIL_KEY, 0);
 
-    while (queueKeys.length > 0) {
-      const key = queueKeys.shift();
-      const raw = allProps[key];
+    while (head <= tail) {
+      const key = queueEventKey_(head);
+      const raw = props.getProperty(key);
       props.deleteProperty(key);
+      head += 1;
+
+      if (head > tail) {
+        // Очередь опустела — сбрасываем счётчики, чтобы они не росли бесконечно.
+        head = 1;
+        tail = 0;
+      }
+
+      props.setProperties({
+        [EDIT_QUEUE_CFG.HEAD_KEY]: String(head),
+        [EDIT_QUEUE_CFG.TAIL_KEY]: String(tail)
+      });
+
+      if (!raw) {
+        if (tail === 0) return null;
+        continue;
+      }
+
       try {
         return JSON.parse(raw);
       } catch (error) {
         Logger.log(`[QUEUE] повреждённое событие ${key} удалено: ${error.message}`);
+        if (tail === 0) return null;
       }
+    }
+
+    if (head !== 1 || tail !== 0) {
+      props.setProperties({
+        [EDIT_QUEUE_CFG.HEAD_KEY]: '1',
+        [EDIT_QUEUE_CFG.TAIL_KEY]: '0'
+      });
     }
     return null;
   } finally {
@@ -244,7 +288,6 @@ function mainEditLogic(eventData) {
     return;
   }
 
-  // Поддержка дополнительных листов, описанных в «Настройки».
   handleNewSheetEdit(ss, sheet, row, col, val);
 }
 
@@ -281,8 +324,6 @@ function handleDeploymentSheetEvent_(ss, sheet, range, row, col, val, isTrue) {
 
     if (!baseSheet) throw new Error('Лист «База» не найден.');
 
-    // Чекбокс сбрасывается до изменения COL_DEPLOYMENT: после смены статуса строка
-    // может исчезнуть из QUERY и на её месте окажется следующее изделие.
     range.setValue(false);
     handleDeployment(itemUUID, itemName, ss, baseSheet, row, initialQuantity);
     return;
@@ -374,8 +415,6 @@ function handleBaseEdit_(ss, sheet, range, row, col, val, isTrue) {
       return;
 
     case COL_READY:
-      // handleReady удаляет строку из «Базы»; после этого нельзя обращаться к
-      // исходному range, потому что по тем же координатам уже находится другая строка.
       if (isTrue) handleReady(ss, sheet, range, row);
       return;
 
@@ -416,7 +455,6 @@ function handleNewSheetEdit(ss, sheet, row, col, val) {
     return null;
   }
 
-  // Сначала сбрасываем ручной чекбокс QUERY-листа, затем меняем этап в Базе.
   sheet.getRange(row, COL_CHECKBOX).setValue(false);
   checkboxOk(baseSheet.getRange(baseRow, baseColumn));
   return itemId;
