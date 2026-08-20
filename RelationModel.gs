@@ -1,9 +1,11 @@
 /**
- * Нормализованный граф спецификаций.
+ * Временное compatibility mirror спецификаций.
  *
- * Лист «Связи спецификации» является машинным источником родства деталей.
- * «База!Назначение» остаётся человекочитаемым представлением и не используется
- * для вычисления иерархии.
+ * После перехода на Variant B источником истины для иерархии являются поля
+ * «База.parent_uuid» и «База.root_uuid». Лист «Связи спецификации» сохраняется
+ * временно, чтобы старые вспомогательные пути и диагностика могли работать до
+ * завершения smoke-test. Формулы «База» и основная логика сворачивания от него
+ * больше не зависят.
  *
  * A child_uuid | B parent_uuid | C child_name | D parent_name | E quantity
  */
@@ -48,7 +50,7 @@ function readSpecRelations_(ss) {
     .filter(Boolean);
 }
 
-/** Полностью заменяет тело служебного графа, сохраняя заголовок. */
+/** Полностью заменяет тело зеркала, сохраняя заголовок. */
 function replaceSpecRelations_(ss, relations) {
   const sheet = getSpecRelationSheet_(ss);
   const normalized = (relations || []).map(normalizeSpecRelation_).filter(Boolean);
@@ -64,8 +66,8 @@ function replaceSpecRelations_(ss, relations) {
 }
 
 /**
- * Добавляет/обновляет связи. Пара child_uuid + parent_uuid уникальна;
- * повторная запись той же пары заменяет имя/количество актуальными значениями.
+ * Добавляет/обновляет зеркало. Пара child_uuid + parent_uuid уникальна.
+ * При Variant B у одного child_uuid должен быть ровно один parent_uuid.
  */
 function appendSpecRelations_(ss, relations) {
   const incoming = (relations || []).map(normalizeSpecRelation_).filter(Boolean);
@@ -81,7 +83,7 @@ function appendSpecRelations_(ss, relations) {
   replaceSpecRelations_(ss, [...byEdge.values()]);
 }
 
-/** Переносит все входящие/исходящие рёбра с одного UUID на другой при слиянии строк. */
+/** Legacy compatibility helper. Автоматическое слияние Variant B не использует. */
 function remapSpecRelationUuid_(ss, fromUuid, toUuid) {
   const from = String(fromUuid || '').trim();
   const to = String(toUuid || '').trim();
@@ -97,7 +99,7 @@ function remapSpecRelationUuid_(ss, fromUuid, toUuid) {
   replaceSpecRelations_(ss, [...byEdge.values()]);
 }
 
-/** Удаляет конкретный набор рёбер child-parent. */
+/** Удаляет конкретный набор рёбер из compatibility mirror. */
 function removeSpecRelationEdges_(ss, edges) {
   const remove = new Set((edges || []).map(edge => {
     const rel = normalizeSpecRelation_(edge);
@@ -110,9 +112,9 @@ function removeSpecRelationEdges_(ss, edges) {
 }
 
 /**
- * Служебный metadata-object для строки, создаваемой развёртыванием.
- * Свойство делается non-enumerable, поэтому writeBaseRows_ не воспринимает его
- * как поле «База», но может после успешной записи материализовать связь.
+ * Metadata для старого рекурсивного генератора. writeBaseRows_ преобразует её
+ * в реальные поля parent_uuid/root_uuid перед записью строки и затем временно
+ * дублирует связь в compatibility mirror.
  */
 function attachSpecRelation_(row, relation) {
   const normalized = normalizeSpecRelation_(relation);
