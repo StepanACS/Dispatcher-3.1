@@ -239,12 +239,23 @@ function findBaseRowByUuid_(baseSheet, itemId) {
   return match ? match.getRow() : null;
 }
 
+/**
+ * Возвращает последнюю реально занятую строку «База» по UUID.
+ * Не используем getNextDataCell(Direction.UP): при разреженной таблице и очищенных
+ * строках он работает как навигация Ctrl+Arrow и может вернуть начало региона,
+ * из-за чего новые изделия записывались в начало «База».
+ */
 function baseLastDataRow_(baseSheet) {
   if (!baseSheet) return 0;
+  const upperBound = Math.max(baseSheet.getLastRow(), 1);
+  if (upperBound < 2) return 1;
+
   const uuidCol = baseCol_(baseSheet.getParent(), 'uuid');
-  const maxRows = baseSheet.getMaxRows();
-  if (maxRows < 2) return 1;
-  return baseSheet.getRange(maxRows, uuidCol).getNextDataCell(SpreadsheetApp.Direction.UP).getRow();
+  const values = baseSheet.getRange(2, uuidCol, upperBound - 1, 1).getDisplayValues();
+  for (let i = values.length - 1; i >= 0; i--) {
+    if (String(values[i][0] || '').trim()) return i + 2;
+  }
+  return 1;
 }
 
 function validateTableArchitecture_() {
