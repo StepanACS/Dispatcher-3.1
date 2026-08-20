@@ -12,121 +12,75 @@ function handleUndeployment(ss, sheet, row) {
 }
 
 /**
- * Сворачивает ветку по нормализованному графу «Связи спецификации».
- * Для детали с несколькими родителями удаляется только ребро сворачиваемой
- * ветки; сама строка сохраняется и её quantity/destination пересчитываются.
+ * Вариант Б: граф спецификации читается непосредственно из «База.parent_uuid».
+ * Выбранная строка сохраняется как узел сборки, а все её потомки очищаются.
+ * Благодаря правилу «одна строка = один родитель» никакого перераспределения
+ * quantity между несколькими назначениями здесь больше нет.
  */
 function removeSpecification(initialParentUuid, ss) {
   const baseSheet = ss.getSheetByName(BASE_SHEET_NAME);
-  if (!baseSheet || !ss.getSheetByName(SPEC_RELATIONS_SHEET_NAME)) {
-    ss.toast('Ошибка: отсутствует «База» или «Связи спецификации».', 'Ошибка', 5);
+  if (!baseSheet) {
+    ss.toast('Ошибка: отсутствует лист «База».', 'Ошибка', 5);
     return;
   }
 
-  const rootUuid = String(initialParentUuid || '').trim();
-  if (!rootUuid) return;
+  const targetUuid = String(initialParentUuid || '').trim();
+  if (!targetUuid) return;
   SpreadsheetApp.flush();
 
-  const lastBaseRow = baseLastDataRow_(baseSheet);
-  if (lastBaseRow < 2) return;
+  const lastRow = baseLastDataRow_(baseSheet);
+  if (lastRow < 2) return;
+  const rowCount = lastRow - 1;
+  const uuidCol = baseCol_(ss, 'uuid');
+  const parentCol = baseCol_(ss, 'parent_uuid');
+  const uuids = baseSheet.getRange(2, uuidCol, rowCount, 1).getDisplayValues().flat();
+  const parents = baseSheet.getRange(2, parentCol, rowCount, 1).getDisplayValues().flat();
 
-  const baseKeys = ['uuid', 'item_name', 'destination', 'quantity'];
-  const cols = baseKeys.map(key => ({ key, col: baseCol_(ss, key) }));
-  const minCol = Math.min(...cols.map(x => x.col));
-  const maxCol = Math.max(...cols.map(x => x.col));
-  const baseData = baseSheet.getRange(2, minCol, lastBaseRow - 1, maxCol - minCol + 1).getValues();
-  const idx = key => cols.find(x => x.key === key).col - minCol;
-
-  const rowsByUuid = new Map();
-  baseData.forEach((r, i) => {
-    const uuid = String(r[idx('uuid')] || '').trim();
-    if (!uuid) return;
-    rowsByUuid.set(uuid, {
-      rowNum: i + 2,
-      name: String(r[idx('item_name')] || '').trim(),
-      destination: String(r[idx('destination')] || '').trim(),
-      quantity: r[idx('quantity')]
-    });
-  });
-  if (!rowsByUuid.has(rootUuid)) {
-    Logger.log(`removeSpecification: UUID ${rootUuid} не найден в Базе.`);
-    return;
-  }
-
-  const relations = readSpecRelations_(ss);
-  const childToRelations = new Map();
-  const parentToChildren = new Map();
-  for (const relation of relations) {
-    if (!childToRelations.has(relation.childUuid)) childToRelations.set(relation.childUuid, []);
-    childToRelations.get(relation.childUuid).push(relation);
-    if (!parentToChildren.has(relation.parentUuid)) parentToChildren.set(relation.parentUuid, new Set());
-    parentToChildren.get(relation.parentUuid).add(relation.childUuid);
-  }
-
-  const queue = [rootUuid];
-  const queued = new Set(queue);
-  const uuidsToClear = new Set([rootUuid]);
-  const pendingUpdates = new Map();
-  const removedParentEdges = new Map();
-
-  while (queue.length) {
-    const currentUuid = queue.shift();
-    for (const childUuid of parentToChildren.get(currentUuid) || []) {
-      const allRelations = childToRelations.get(childUuid) || [];
-      if (!allRelations.some(rel => rel.parentUuid === currentUuid)) continue;
-
-      if (!removedParentEdges.has(childUuid)) removedParentEdges.set(childUuid, new Set());
-      removedParentEdges.get(childUuid).add(currentUuid);
-      const removed = removedParentEdges.get(childUuid);
-      const remaining = allRelations.filter(rel => !removed.has(rel.parentUuid));
-
-      if (!remaining.length) {
-        uuidsToClear.add(childUuid);
-        pendingUpdates.delete(childUuid);
-        if (!queued.has(childUuid)) { queued.add(childUuid); queue.push(childUuid); }
-      } else {
-        uuidsToClear.delete(childUuid);
-        pendingUpdates.set(childUuid, {
-          newDestination: remaining
-            .map(rel => `${rel.parentName} = ${rel.quantity} (${rel.parentUuid})`)
-            .join('\n'),
-          newQty: remaining.reduce((sum, rel) => sum + Number(rel.quantity || 0), 0)
-        });
-      }
+  const rowByUuid = new Map();
+  const childrenByParent = new Map();
+  for (let i = 0; i < uuids.length; i++) {
+    const uuid = String(uuids[i] || '').trim();
+    const parent = String(parents[i] || '').trim();
+    if (!uuid) continue;
+    rowByUuid.set(uuid, i + 2);
+    if (parent) {
+      if (!childrenByParent.has(parent)) childrenByParent.set(parent, []);
+      childrenByParent.get(parent).push(uuid);
     }
   }
 
-  // Корневая сборка без собственного родителя остаётся самостоятельной строкой.
-  const rootEntry = rowsByUuid.get(rootUuid);
-  const rootRelations = childToRelations.get(rootUuid) || [];
-  if (rootRelations.length || !rootEntry.destination) uuidsToClear.delete(rootUuid);
-
-  const rowsToClear = [];
-  for (const uuid of uuidsToClear) {
-    const entry = rowsByUuid.get(uuid);
-    if (entry) rowsToClear.push(entry.rowNum);
+  if (!rowByUuid.has(targetUuid)) {
+    Logger.log(`removeSpecification: UUID ${targetUuid} не найден в Базе.`);
+    return;
   }
+
+  const descendants = new Set();
+  const queue = [...(childrenByParent.get(targetUuid) || [])];
+  while (queue.length) {
+    const uuid = queue.shift();
+    if (!uuid || descendants.has(uuid)) continue;
+    descendants.add(uuid);
+    for (const child of childrenByParent.get(uuid) || []) queue.push(child);
+  }
+
+  const rowsToClear = [...descendants]
+    .map(uuid => rowByUuid.get(uuid))
+    .filter(Boolean);
   clearBaseRawRows_(baseSheet, rowsToClear);
 
-  for (const [uuid, update] of pendingUpdates) {
-    const entry = rowsByUuid.get(uuid);
-    if (!entry || uuidsToClear.has(uuid)) continue;
-    writeBaseFields_(baseSheet, entry.rowNum, {
-      destination: update.newDestination,
-      quantity: update.newQty
-    });
+  // Поддерживаем старый лист только как compatibility mirror, пока проверка
+  // повторного развёртывания ещё использует его. Расчёты от него не зависят.
+  if (ss.getSheetByName(SPEC_RELATIONS_SHEET_NAME) && descendants.size) {
+    replaceSpecRelations_(ss, readSpecRelations_(ss).filter(rel =>
+      !descendants.has(rel.childUuid)
+    ));
   }
 
-  const removedEdges = [];
-  for (const [childUuid, parents] of removedParentEdges) {
-    for (const parentUuid of parents) removedEdges.push({ childUuid, parentUuid });
-  }
-  removeSpecRelationEdges_(ss, removedEdges);
   SpreadsheetApp.flush();
   ss.toast('Откат спецификации завершен.', 'Информация', 5);
 }
 
-/** Legacy parser: нужен для импорта старых destination-строк и диагностики. */
+/** Legacy parser: только для диагностики старых текстовых Назначений. */
 function parseDestinationCell(cellValue) {
   if (!cellValue) return [];
   const destinations = [];
