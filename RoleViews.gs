@@ -156,6 +156,13 @@ function installRoleViews_(ss) {
       sheet.getRange(2, 13).setFormula(
         `=ARRAYFORMULA(${columnNumberToLetter_(helperExtraStart)}2:${columnNumberToLetter_(helperExtraEnd)})`
       );
+
+      // Stage-поля в дополнительных колонках отображаем как даты, а не serial number.
+      extraProjection.forEach((item, index) => {
+        if (STAGE_FIELD_KEYS.indexOf(item.key) === -1) return;
+        sheet.getRange(2, 13 + index, Math.max(sheet.getMaxRows() - 1, 1), 1)
+          .setNumberFormat('dd.MM.yyyy');
+      });
     }
 
     for (const manual of config.manual || []) sheet.getRange(1, manual.column).setValue(manual.header);
