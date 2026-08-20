@@ -41,7 +41,11 @@ function buildBaseComputedFormulas_(ss) {
     status: `=BYROW(HSTACK(${item};${stageRanges.join(';')});LAMBDA(row;IF(INDEX(row;1;1)="";"";IFNA(INDEX('Настройки'!A$2:A$14;MATCH(FALSE;CHOOSECOLS(row;2;3;4;5;6;7;8;9;10;11;12;13;14);0));"Готово"))))`,
     production_mode: `=ARRAYFORMULA(IF(${item}="";"";IF(IFNA(XLOOKUP(${item};'Цена материалов'!A:A;'Цена материалов'!A:A);"")="";"В производство";"В снабжение")))`,
     salesdrive_id: `=ARRAYFORMULA(IF(${item}="";"";IFNA(XLOOKUP(${item};'SD ID'!B:B;'SD ID'!A:A);"")))`,
-    supply_ordered: `=MAP(${item};LAMBDA(x;IF(x="";"";IFERROR(SUMIF('Снабжение'!A:A;x;'Снабжение'!C:C);""))))`,
+
+    // Вместо SUMIF по всему «Снабжение» для каждой строки сначала один раз
+    // агрегируем снабжение по изделию, затем выполняем один векторный XLOOKUP.
+    supply_ordered: `=LET(agg;QUERY('Снабжение'!A2:C;"select A,sum(C) where A is not null group by A label sum(C) ''";0);ARRAYFORMULA(IF(${item}="";"";IFNA(XLOOKUP(${item};CHOOSECOLS(agg;1);CHOOSECOLS(agg;2));0))))`,
+
     tied_capital: `=MAP(${item};${parentUuid};${quantity};LAMBDA(x;p;q;IF(x="";"";IF(p="";IFNA(XLOOKUP(x;'ГТ Себестоимость'!B:B;'ГТ Себестоимость'!C:C);0)*q;0))))`,
     salesdrive_stock: `=ARRAYFORMULA(IF(${item}="";"";IFNA(XLOOKUP(REGEXREPLACE(${item};"Л$";"");REGEXREPLACE('Остатки'!E:E;"Л$";"");'Остатки'!F:F);"")))`,
     abc: `=ARRAYFORMULA(IF(${item}="";"";IF(${parentUuid}<>"";"";IFNA(XLOOKUP(${item};ABC!A:A;ABC!B:B);"F"))))`,
@@ -52,7 +56,10 @@ function buildBaseComputedFormulas_(ss) {
     cost: `=ARRAYFORMULA(IF(${item}="";"";IF(${parentUuid}="";IFNA(XLOOKUP(${item};'ГТ Себестоимость'!B:B;'ГТ Себестоимость'!C:C);"");"")))`,
     parent_name: `=ARRAYFORMULA(IF(${uuid}="";"";IF(${parentUuid}="";"";IFNA(XLOOKUP(${parentUuid};${uuid};${item});IFERROR(REGEXEXTRACT(${destination};"^(.+?)\\s*=\\s*");"")))))`,
     root_name: `=ARRAYFORMULA(IF(${uuid}="";"";IFNA(XLOOKUP(${rootUuid};${uuid};${item});IF(${rootUuid}=${parentUuid};${parentName};""))))`,
-    need_status: `=MAP(${uuid};${item};${needFlag};${status};${mode};LAMBDA(u;x;n;s;m;IF(x="";"";IF(n<>"Да";"Нет";IF(OR(s="Производство";s="Склад производства");"В производстве";IF(OR(s="ОТК";s="Приемка";s="Готово");"Готово";IF(m<>"В производство";"Покупной";IF(COUNTIF(${parentUuid};u)=0;"Комплектующие не найдены";IF(IFERROR(SUM(XLOOKUP(FILTER(${uuid};${parentUuid}=u);${uuid};${deficit}));0)>0;"Нет";"Да")))))))))`
+
+    // Variant B позволяет агрегировать дочерний дефицит один раз по parent_uuid.
+    // Раньше каждая строка отдельно делала COUNTIF+FILTER+XLOOKUP по всей «База».
+    need_status: `=LET(agg;QUERY(HSTACK(${parentUuid};${deficit});"select Col1,count(Col1),sum(Col2) where Col1 is not null group by Col1 label count(Col1) '', sum(Col2) ''";0);childCount;IFNA(XLOOKUP(${uuid};CHOOSECOLS(agg;1);CHOOSECOLS(agg;2));0);childDeficit;IFNA(XLOOKUP(${uuid};CHOOSECOLS(agg;1);CHOOSECOLS(agg;3));0);ARRAYFORMULA(IF(${item}="";"";IF(${needFlag}<>"Да";"Нет";IF(((${status}="Производство")+(${status}="Склад производства"))>0;"В производстве";IF(((${status}="ОТК")+(${status}="Приемка")+(${status}="Готово"))>0;"Готово";IF(${mode}<>"В производство";"Покупной";IF(childCount=0;"Комплектующие не найдены";IF(childDeficit>0;"Нет";"Да")))))))))`
   });
 }
 
@@ -76,6 +83,5 @@ function installBaseFormulaModel_(ss) {
     if (maxRows >= 2) baseSheet.getRange(2, col, maxRows - 1, 1).clearContent();
     baseSheet.getRange(2, col).setFormula(formula);
   }
-  SpreadsheetApp.flush();
   return validateTableArchitecture_();
 }
