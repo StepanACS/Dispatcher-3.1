@@ -2,8 +2,8 @@
  * Декларативная модель исполнительских листов.
  *
  * A:J — вычисляемая проекция «База»; K/L — ручные checkbox-поля; M+ —
- * дополнительные вычисляемые либо ручные поля. Единственный тяжёлый FILTER
- * каждого листа находится в скрытом блоке, начиная с BA.
+ * дополнительные вычисляемые либо ручные поля. Единственный FILTER каждого
+ * листа находится в скрытом блоке, начиная с BA.
  */
 const ROLE_VIEW_COMMON_FIELDS = Object.freeze([
   'date', 'drawing_link', 'order_link', 'uuid', 'item_name',
@@ -25,8 +25,9 @@ const ROLE_VIEW_CONFIG = Object.freeze({
     extraHeaders: { supply_ordered: 'Заказано' }
   },
   'Комплектация': {
-    extras: ['need_status', 'production_mode', 'salesdrive_id'],
-    derived: [{ key: '__completion_percent', header: 'Процент готовности' }]
+    extras: ['need_status', 'production_mode', 'salesdrive_id', 'supply_ordered'],
+    extraHeaders: { supply_ordered: 'Заказано' },
+    derived: [{ key: '__completion_percent', header: 'Процент готовности', beforeExtra: 'supply_ordered' }]
   },
   'Склад': {
     extras: ['salesdrive_order_id', 'trello_id'],
@@ -54,25 +55,52 @@ function columnNumberToLetter_(column) {
   return result;
 }
 
-function roleViewFieldExpression_(fieldKey) {
-  return `CHOOSECOLS(d;MATCH("${baseHeader_(getDispatcherRuntimeSpreadsheet_(), fieldKey)}";h;0))`;
+/**
+ * Прямая ссылка только на нужный semantic field.
+ * При ручном перемещении столбца Google Sheets сам перепривяжет ссылку,
+ * поэтому здесь не нужен тяжёлый A:AX + MATCH/CHOOSECOLS на каждом пересчёте.
+ */
+function roleViewFieldRange_(ss, fieldKey) {
+  const letter = columnNumberToLetter_(baseCol_(ss, fieldKey));
+  return `'${BASE_SHEET_NAME}'!$${letter}$2:$${letter}`;
+}
+
+function buildRoleViewProjection_(ss, config) {
+  const result = ROLE_VIEW_COMMON_FIELDS.map(key => ({
+    key,
+    header: baseHeader_(ss, key),
+    expression: roleViewFieldRange_(ss, key)
+  }));
+
+  const extras = config.extras || [];
+  const derived = config.derived || [];
+  for (const key of extras) {
+    for (const item of derived.filter(d => d.beforeExtra === key)) {
+      result.push({ key: item.key, header: item.header, expression: roleDerivedExpression_(ss, item.key) });
+    }
+    result.push({
+      key,
+      header: roleExtraHeader_(ss, config, key),
+      expression: roleViewFieldRange_(ss, key)
+    });
+  }
+  for (const item of derived.filter(d => !d.beforeExtra || extras.indexOf(d.beforeExtra) === -1)) {
+    result.push({ key: item.key, header: item.header, expression: roleDerivedExpression_(ss, item.key) });
+  }
+  return result;
+}
+
+function roleDerivedExpression_(ss, key) {
+  if (key === '__completion_percent') {
+    return `IFERROR(${roleViewFieldRange_(ss, 'stock')}/${roleViewFieldRange_(ss, 'quantity')}*100;"")`;
+  }
+  throw new Error(`Неизвестное derived-поле role view: ${key}`);
 }
 
 function buildRoleViewSourceFormula_(ss, sheetName, config) {
-  setDispatcherRuntimeSpreadsheet_(ss);
-  const arch = getBaseArchitecture_(ss);
-  const lastCol = columnNumberToLetter_(arch.lastColumn);
-  const expressions = ROLE_VIEW_COMMON_FIELDS.map(roleViewFieldExpression_);
-  (config.extras || []).forEach(key => expressions.push(roleViewFieldExpression_(key)));
-
-  for (const derived of config.derived || []) {
-    if (derived.key === '__completion_percent') {
-      expressions.push(`IFERROR(${roleViewFieldExpression_('stock')}/${roleViewFieldExpression_('quantity')}*100;"")`);
-    }
-  }
-
-  const statusHeader = baseHeader_(ss, 'status');
-  return `=LET(h;'${BASE_SHEET_NAME}'!$A$1:$${lastCol}$1;d;'${BASE_SHEET_NAME}'!$A$2:$${lastCol};st;CHOOSECOLS(d;MATCH("${statusHeader}";h;0));IFNA(FILTER(HSTACK(${expressions.join(';')});st="${sheetName}");""))`;
+  const projection = buildRoleViewProjection_(ss, config);
+  const statusRange = roleViewFieldRange_(ss, 'status');
+  return `=IFNA(FILTER(HSTACK(${projection.map(item => item.expression).join(';')});${statusRange}="${sheetName}");"")`;
 }
 
 function roleExtraHeader_(ss, config, fieldKey) {
@@ -98,8 +126,8 @@ function installRoleViews_(ss) {
     let sheet = ss.getSheetByName(sheetName);
     if (!sheet) sheet = ss.insertSheet(sheetName);
 
-    const totalSourceColumns = ROLE_VIEW_COMMON_FIELDS.length +
-      (config.extras || []).length + (config.derived || []).length;
+    const projection = buildRoleViewProjection_(ss, config);
+    const totalSourceColumns = projection.length;
     const requiredCols = helperFirstCol + Math.max(totalSourceColumns, 18) - 1;
     if (sheet.getMaxColumns() < requiredCols) {
       sheet.insertColumnsAfter(sheet.getMaxColumns(), requiredCols - sheet.getMaxColumns());
@@ -118,15 +146,13 @@ function installRoleViews_(ss) {
     else sheet.getRange(1, COL_RETURN_CHECKBOX).clearContent();
     sheet.getRange(2, COL_CHECKBOX, Math.max(sheet.getMaxRows() - 1, 1), checkboxCount).setDataValidation(checkboxRule);
 
-    // Sourced extras start in M; clear only fields owned by the view.
-    const extraHeaders = [];
-    (config.extras || []).forEach(key => extraHeaders.push(roleExtraHeader_(ss, config, key)));
-    (config.derived || []).forEach(item => extraHeaders.push(item.header));
-    if (extraHeaders.length) {
-      sheet.getRange(1, 13, 1, extraHeaders.length).setValues([extraHeaders]);
-      sheet.getRange(2, 13, Math.max(sheet.getMaxRows() - 1, 1), extraHeaders.length).clearContent();
+    // Всё после первых 10 полей проекции выводится в M+.
+    const extraProjection = projection.slice(ROLE_VIEW_COMMON_FIELDS.length);
+    if (extraProjection.length) {
+      sheet.getRange(1, 13, 1, extraProjection.length).setValues([extraProjection.map(item => item.header)]);
+      sheet.getRange(2, 13, Math.max(sheet.getMaxRows() - 1, 1), extraProjection.length).clearContent();
       const helperExtraStart = helperFirstCol + ROLE_VIEW_COMMON_FIELDS.length;
-      const helperExtraEnd = helperExtraStart + extraHeaders.length - 1;
+      const helperExtraEnd = helperExtraStart + extraProjection.length - 1;
       sheet.getRange(2, 13).setFormula(
         `=ARRAYFORMULA(${columnNumberToLetter_(helperExtraStart)}2:${columnNumberToLetter_(helperExtraEnd)})`
       );
@@ -134,13 +160,13 @@ function installRoleViews_(ss) {
 
     for (const manual of config.manual || []) sheet.getRange(1, manual.column).setValue(manual.header);
 
-    // One hidden source formula per role sheet.
+    // One hidden source formula per role sheet. В отличие от прежней версии она
+    // зависит только от реально используемых столбцов «База», а не от A:AX целиком.
     const helperWidth = Math.max(totalSourceColumns, 18);
     sheet.getRange(1, helperFirstCol, sheet.getMaxRows(), helperWidth).clearContent();
     sheet.getRange(2, helperFirstCol).setFormula(buildRoleViewSourceFormula_(ss, sheetName, config));
     sheet.hideColumns(helperFirstCol, helperWidth);
   }
-  SpreadsheetApp.flush();
 }
 
 /** Backward-compatible admin entry point; old letter-based QUERY generator removed. */
