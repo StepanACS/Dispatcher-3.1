@@ -1,9 +1,9 @@
 /**
  * Основной обработчик редактирования.
  *
- * onEdit выполняет короткую постановку события в FIFO-очередь. Длительная
- * бизнес-логика сериализуется ScriptLock, а доступ к «База» выполняется только
- * через семантические field_key из TableArchitecture.gs.
+ * Одиночное событие при свободном процессоре выполняется напрямую через
+ * e.source без PropertiesService/openById. FIFO-очередь остаётся fallback для
+ * параллельных/накопившихся событий и сохраняет их от потери.
  */
 
 const EDIT_QUEUE_CFG = {
@@ -14,7 +14,10 @@ const EDIT_QUEUE_CFG = {
   ENQUEUE_LOCK_WAIT_MS: 5000,
   QUEUE_LOCK_WAIT_MS: 5000,
   PROCESS_LOCK_WAIT_MS: 500,
-  DRAIN_TIME_LIMIT_MS: 240000
+  FAST_PATH_LOCK_WAIT_MS: 25,
+  FAST_PATH_QUEUE_LOCK_WAIT_MS: 50,
+  DRAIN_TIME_LIMIT_MS: 240000,
+  PERF_LOG_THRESHOLD_MS: 500
 };
 
 const STATUS_TOAST_CFG = Object.freeze({
@@ -90,8 +93,7 @@ function getRoleSheetConfig_() {
     'Готово': {
       noteColumns: [ROLE_COL_NOTE],
       completion: 'ready',
-      returnField: 'stage_acceptance',
-      fillNextStage: false
+      returnField: 'stage_acceptance'
     }
   });
   return _roleSheetConfigCache;
@@ -103,7 +105,7 @@ const BASE_STAGE_ACTIONS = Object.freeze({
   stage_deployment: 'Развертывание спецификации',
   stage_technologist: 'Технолог',
   stage_technology_check: 'Проверка технологии',
-  stage_picker: 'Диспетчер-комплектовщик',
+  stage_picker: 'Диспетчер- комплектовщик',
   stage_picking: 'Комплектация',
   stage_stock: 'Склад',
   stage_production_stock: 'Склад производства',
@@ -179,6 +181,33 @@ function showActionStatus_(ss, state, label, details) {
   catch (error) { Logger.log(`showActionStatus_: ${error.message}`); }
 }
 
+function logSlowEdit_(path, payload, startedAt) {
+  const elapsed = Date.now() - startedAt;
+  if (elapsed < EDIT_QUEUE_CFG.PERF_LOG_THRESHOLD_MS) return;
+  Logger.log(`[PERF] ${path} ${elapsed} ms | ${payload.sheetName}!${payload.a1Notation || ''} | ${payload.statusLabel || payload.id || ''}`);
+}
+
+function executeEditPayload_(payload, spreadsheet, path) {
+  const startedAt = Date.now();
+  try {
+    setDispatcherRuntimeSpreadsheet_(spreadsheet);
+    if (payload.trackStatus) showActionStatus_(spreadsheet, 'working', payload.statusLabel);
+    const result = mainEditLogic(payload, spreadsheet);
+    if (payload.trackStatus) {
+      showActionStatus_(spreadsheet, result === false ? 'notDone' : 'success', payload.statusLabel);
+    }
+    return result;
+  } catch (error) {
+    Logger.log(`[${path}] событие ${payload.id || 'unknown'} завершилось ошибкой: ` + (error && error.stack ? error.stack : error));
+    if (payload.trackStatus) {
+      showActionStatus_(spreadsheet, 'error', payload.statusLabel || 'операция', error && error.message ? error.message : String(error));
+    }
+    return false;
+  } finally {
+    logSlowEdit_(path, payload, startedAt);
+  }
+}
+
 function onEditHandler(e) {
   if (!e || !e.range) {
     Logger.log('onEditHandler: событие отсутствует или не содержит range.');
@@ -209,13 +238,17 @@ function onEditHandler(e) {
       statusLabel: buildStatusLabel_(actionName, itemName)
     };
 
+    // Нормальный одиночный клик не проходит через PropertiesService/openById.
+    // Если процессор занят или уже есть backlog, событие уходит в прежнюю FIFO.
+    if (tryFastEditPath_(payload, spreadsheet)) return;
+
     if (!enqueueEditEvent_(payload)) {
       Logger.log(`onEditHandler: не удалось поставить событие ${payload.id} в очередь.`);
       if (payload.trackStatus) showActionStatus_(spreadsheet, 'error', payload.statusLabel, 'Не удалось поставить задачу в очередь.');
       return;
     }
     if (payload.trackStatus) showActionStatus_(spreadsheet, 'queued', payload.statusLabel);
-    tryProcessEditQueue_();
+    tryProcessEditQueue_(spreadsheet);
   } catch (error) {
     Logger.log('onEditHandler: ' + (error && error.stack ? error.stack : error));
   }
@@ -228,6 +261,35 @@ function queuePosition_(props, key, fallback) {
 
 function queueEventKey_(position) {
   return EDIT_QUEUE_CFG.EVENT_PREFIX + String(position).padStart(12, '0');
+}
+
+function isEditQueueEmpty_() {
+  const lock = LockService.getDocumentLock();
+  if (!lock || !lock.tryLock(EDIT_QUEUE_CFG.FAST_PATH_QUEUE_LOCK_WAIT_MS)) return false;
+  try {
+    const props = PropertiesService.getDocumentProperties();
+    const head = queuePosition_(props, EDIT_QUEUE_CFG.HEAD_KEY, 1);
+    const tail = queuePosition_(props, EDIT_QUEUE_CFG.TAIL_KEY, 0);
+    return tail === 0 || tail < head;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function tryFastEditPath_(payload, spreadsheet) {
+  const processorLock = LockService.getScriptLock();
+  if (!processorLock.tryLock(EDIT_QUEUE_CFG.FAST_PATH_LOCK_WAIT_MS)) return false;
+  try {
+    if (!isEditQueueEmpty_()) return false;
+    executeEditPayload_(payload, spreadsheet, 'FAST');
+
+    // Если пока выполнялся fast-path пришли параллельные события, обработаем их
+    // тем же процессором сразу после текущего, не оставляя до следующего onEdit.
+    drainEditQueueLocked_(spreadsheet, Date.now());
+    return true;
+  } finally {
+    processorLock.releaseLock();
+  }
 }
 
 function enqueueEditEvent_(payload) {
@@ -254,39 +316,31 @@ function enqueueEditEvent_(payload) {
   }
 }
 
-function tryProcessEditQueue_() {
+function tryProcessEditQueue_(sourceSpreadsheet) {
   const processorLock = LockService.getScriptLock();
   if (!processorLock.tryLock(EDIT_QUEUE_CFG.PROCESS_LOCK_WAIT_MS)) return;
-  const startedAt = Date.now();
   try {
-    while (Date.now() - startedAt <= EDIT_QUEUE_CFG.DRAIN_TIME_LIMIT_MS) {
-      const next = dequeueOneEvent_();
-      if (!next) return;
-      let statusSs = null;
-      try {
-        statusSs = SpreadsheetApp.openById(next.spreadsheetId);
-        setDispatcherRuntimeSpreadsheet_(statusSs);
-        if (next.trackStatus) showActionStatus_(statusSs, 'working', next.statusLabel);
-        const result = mainEditLogic(next, statusSs);
-        if (next.trackStatus) {
-          showActionStatus_(statusSs, result === false ? 'notDone' : 'success', next.statusLabel);
-        }
-      } catch (error) {
-        Logger.log(`[QUEUE] событие ${next.id || 'unknown'} завершилось ошибкой: ` + (error && error.stack ? error.stack : error));
-        if (next.trackStatus) {
-          if (!statusSs) {
-            try { statusSs = SpreadsheetApp.openById(next.spreadsheetId); }
-            catch (openError) { Logger.log(`[QUEUE] не удалось открыть таблицу для toast: ${openError.message}`); }
-          }
-          showActionStatus_(statusSs, 'error', next.statusLabel || 'операция', error && error.message ? error.message : String(error));
-        }
-      }
-    }
-    Logger.log('[QUEUE] достигнут лимит времени; оставшиеся события будут обработаны следующим запуском.');
+    drainEditQueueLocked_(sourceSpreadsheet || null, Date.now());
   } finally {
-    SpreadsheetApp.flush();
     processorLock.releaseLock();
   }
+}
+
+function drainEditQueueLocked_(sourceSpreadsheet, startedAt) {
+  while (Date.now() - startedAt <= EDIT_QUEUE_CFG.DRAIN_TIME_LIMIT_MS) {
+    const next = dequeueOneEvent_();
+    if (!next) return;
+    let ss = sourceSpreadsheet;
+    if (!ss || ss.getId() !== next.spreadsheetId) {
+      try { ss = SpreadsheetApp.openById(next.spreadsheetId); }
+      catch (error) {
+        Logger.log(`[QUEUE] не удалось открыть таблицу ${next.spreadsheetId}: ${error.message}`);
+        continue;
+      }
+    }
+    executeEditPayload_(next, ss, 'QUEUE');
+  }
+  Logger.log('[QUEUE] достигнут лимит времени; оставшиеся события будут обработаны следующим запуском.');
 }
 
 function dequeueOneEvent_() {
@@ -405,8 +459,10 @@ function handleRoleSheetEdit_(ss, sheet, range, row, col, val, isTrue, config) {
   }
   if (col !== COL_CHECKBOX || !isTrue) return false;
 
+  // Validation K/L уже постоянно установлена installRoleViews_(). После записи
+  // даты статус пересчитается сам; искать строку на следующем листе и делать
+  // принудительный SpreadsheetApp.flush() больше не требуется.
   const itemId = runRoleCompletion_(config.completion, ss, sheet, range, row, col, val);
-  if (itemId && config.fillNextStage !== false) fillCheckboxes(ss, itemId);
   return Boolean(itemId);
 }
 
@@ -480,7 +536,7 @@ function handleNewSheetEdit(ss, sheet, row, col, val) {
     return null;
   }
 
-  // Сначала снимаем checkbox на QUERY/spill-листе, потом меняем статус в «База»,
+  // Сначала снимаем checkbox на spill-листе, потом меняем статус в «База»,
   // иначе следующая строка может сдвинуться на те же координаты.
   sheet.getRange(row, COL_CHECKBOX).setValue(false);
   checkboxOk(baseSheet.getRange(baseRow, baseCol_(ss, stageField)));
