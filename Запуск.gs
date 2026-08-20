@@ -44,7 +44,6 @@ function handleLaunchEdit(ss, launchSheet, rowNumber) {
 
   deleteRowsInBlocks_(launchSheet, rowsToDelete);
   restoreLaunchInputRows_(launchSheet, rowsToDelete.length);
-  SpreadsheetApp.flush();
   ss.toast('Изделие(я) добавлено(ы) в базу', 'Информация', 5);
 }
 
