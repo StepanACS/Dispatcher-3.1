@@ -5,6 +5,8 @@
  */
 const BASE_SHEET_NAME = 'База';
 const BASE_SCHEMA_SHEET_NAME = 'Схема';
+// Временное зеркало для совместимости старых deploy/undeploy-проверок.
+// Источником истины для иерархии теперь являются parent_uuid/root_uuid в «База».
 const SPEC_RELATIONS_SHEET_NAME = 'Связи спецификации';
 
 const REQUIRED_BASE_FIELDS = Object.freeze([
@@ -18,7 +20,8 @@ const REQUIRED_BASE_FIELDS = Object.freeze([
   'actual_made', 'responsible_technologist', 'designer', 'supply_ordered',
   'tied_capital', 'salesdrive_stock', 'abc', 'abc_components',
   'abc_components_2', 'priority', 'tooling', 'deadline', 'cost',
-  'should_order', 'supplier', 'order_produced_received'
+  'should_order', 'supplier', 'order_produced_received',
+  'parent_uuid', 'root_uuid', 'parent_name', 'root_name'
 ]);
 
 const STAGE_FIELD_KEYS = Object.freeze([
@@ -151,10 +154,47 @@ function writeBaseFields_(baseSheet, row, valuesByKey, options = {}) {
   }
 }
 
+function resolveParentRootUuid_(baseSheet, parentUuid, pendingRootByUuid) {
+  if (!parentUuid) return '';
+  if (pendingRootByUuid.has(parentUuid)) return pendingRootByUuid.get(parentUuid);
+  const parentRow = findBaseRowByUuid_(baseSheet, parentUuid);
+  if (!parentRow) return parentUuid;
+  const parent = readBaseFields_(baseSheet, parentRow, ['uuid', 'root_uuid']);
+  return String(parent.root_uuid || parent.uuid || parentUuid).trim();
+}
+
 /**
- * Пакетно записывает новые строки. Вычисляемые поля не пишутся. Если строка
- * содержит non-enumerable metadata _specRelation, связь материализуется только
- * после успешной записи данных в «База».
+ * Вариант Б: одна строка = одно применение компонента у одного родителя.
+ * _specRelation используется только как входная metadata старого рекурсивного
+ * генератора; перед записью она преобразуется в реальные поля parent_uuid/root_uuid.
+ */
+function prepareBaseHierarchyRows_(baseSheet, rows) {
+  const pendingRootByUuid = new Map();
+  for (const row of rows) {
+    if (!row) continue;
+    const uuid = String(row.uuid || '').trim();
+    if (!uuid) continue;
+    const relation = row._specRelation || null;
+    const relationParent = relation ? String(relation.parentUuid || '').trim() : '';
+    const parentUuid = String(row.parent_uuid || relationParent || '').trim();
+    let rootUuid = String(row.root_uuid || '').trim();
+
+    if (!rootUuid) {
+      rootUuid = parentUuid
+        ? resolveParentRootUuid_(baseSheet, parentUuid, pendingRootByUuid)
+        : uuid;
+    }
+
+    row.parent_uuid = parentUuid;
+    row.root_uuid = rootUuid || parentUuid || uuid;
+    pendingRootByUuid.set(uuid, row.root_uuid);
+  }
+}
+
+/**
+ * Пакетно записывает новые строки. Вычисляемые поля не пишутся.
+ * parent_uuid/root_uuid материализуются непосредственно в «База».
+ * «Связи спецификации» пока обновляется как временное compatibility mirror.
  */
 function writeBaseRows_(baseSheet, startRow, rows) {
   if (!baseSheet || !rows || !rows.length) return;
@@ -162,6 +202,8 @@ function writeBaseRows_(baseSheet, startRow, rows) {
   const neededEndRow = startRow + rows.length - 1;
   const maxRows = baseSheet.getMaxRows();
   if (neededEndRow > maxRows) baseSheet.insertRowsAfter(maxRows, neededEndRow - maxRows);
+
+  prepareBaseHierarchyRows_(baseSheet, rows);
 
   const keySet = new Set();
   rows.forEach(row => Object.keys(row || {}).forEach(key => keySet.add(key)));
@@ -179,6 +221,8 @@ function writeBaseRows_(baseSheet, startRow, rows) {
     baseSheet.getRange(startRow, group[0].col, rows.length, group.length).setValues(matrix);
   }
 
+  // Временное зеркало: после полного smoke-test старых deploy/undeploy-путей
+  // можно удалить вместе с RelationModel.gs.
   const relations = rows.map(row => row && row._specRelation).filter(Boolean);
   if (relations.length) appendSpecRelations_(ss, relations);
 }
@@ -209,6 +253,7 @@ function validateTableArchitecture_() {
   clearTableArchitectureCache_(ss);
   const architecture = getBaseArchitecture_(ss);
   const issues = [];
+  const warnings = [];
   const lastDataRow = baseLastDataRow_(architecture.baseSheet);
 
   for (const key of architecture.computedKeys) {
@@ -222,6 +267,43 @@ function validateTableArchitecture_() {
       const formulasBelow = architecture.baseSheet.getRange(3, col, lastDataRow - 2, 1).getFormulas();
       if (formulasBelow.some(row => Boolean(row[0]))) issues.push(`Найдены построчные формулы ниже якоря: ${key}`);
     }
+  }
+
+  if (lastDataRow >= 2) {
+    const rowCount = lastDataRow - 1;
+    const base = architecture.baseSheet;
+    const uuids = base.getRange(2, baseCol_(ss, 'uuid'), rowCount, 1).getDisplayValues().flat();
+    const parents = base.getRange(2, baseCol_(ss, 'parent_uuid'), rowCount, 1).getDisplayValues().flat();
+    const roots = base.getRange(2, baseCol_(ss, 'root_uuid'), rowCount, 1).getDisplayValues().flat();
+    const rootByUuid = new Map();
+    uuids.forEach((uuid, i) => { if (uuid) rootByUuid.set(uuid, roots[i]); });
+
+    let missingRoots = 0;
+    let invalidTopRoots = 0;
+    let selfParents = 0;
+    let rootMismatches = 0;
+    let orphanParents = 0;
+    for (let i = 0; i < uuids.length; i++) {
+      const uuid = String(uuids[i] || '').trim();
+      if (!uuid) continue;
+      const parent = String(parents[i] || '').trim();
+      const root = String(roots[i] || '').trim();
+      if (!root) missingRoots++;
+      if (!parent && root && root !== uuid) invalidTopRoots++;
+      if (parent && parent === uuid) selfParents++;
+      if (parent) {
+        if (!rootByUuid.has(parent)) orphanParents++;
+        else {
+          const expectedRoot = String(rootByUuid.get(parent) || parent).trim();
+          if (root && expectedRoot && root !== expectedRoot) rootMismatches++;
+        }
+      }
+    }
+    if (missingRoots) issues.push(`Строки без root_uuid: ${missingRoots}.`);
+    if (invalidTopRoots) issues.push(`Корневые строки с root_uuid != собственному UUID: ${invalidTopRoots}.`);
+    if (selfParents) issues.push(`Строки с parent_uuid = собственному UUID: ${selfParents}.`);
+    if (rootMismatches) issues.push(`Несогласованный root_uuid относительно существующего родителя: ${rootMismatches}.`);
+    if (orphanParents) warnings.push(`Исторические parent_uuid, отсутствующие в текущей База: ${orphanParents}.`);
   }
 
   const settingsSheet = ss.getSheetByName('Настройки');
@@ -239,12 +321,12 @@ function validateTableArchitecture_() {
   }
 
   const relationSheet = ss.getSheetByName(SPEC_RELATIONS_SHEET_NAME);
-  if (!relationSheet) issues.push(`Нет листа «${SPEC_RELATIONS_SHEET_NAME}».`);
+  if (!relationSheet) warnings.push(`Нет временного compatibility mirror «${SPEC_RELATIONS_SHEET_NAME}».`);
   else {
     const expected = ['child_uuid', 'parent_uuid', 'child_name', 'parent_name', 'quantity'];
     const actual = relationSheet.getRange(1, 1, 1, expected.length).getDisplayValues()[0]
       .map(v => String(v || '').trim());
-    if (expected.some((v, i) => actual[i] !== v)) issues.push(`Некорректные заголовки «${SPEC_RELATIONS_SHEET_NAME}».`);
+    if (expected.some((v, i) => actual[i] !== v)) warnings.push(`Некорректные заголовки compatibility mirror «${SPEC_RELATIONS_SHEET_NAME}».`);
   }
 
   const result = {
@@ -253,7 +335,8 @@ function validateTableArchitecture_() {
     mappedFields: architecture.keyToColumn.size,
     computedFields: architecture.computedKeys.size,
     lastDataRow,
-    issues
+    issues,
+    warnings
   };
   Logger.log(JSON.stringify(result, null, 2));
   return result;
