@@ -13,6 +13,7 @@ function baseColumnRange_(ss, fieldKey, startRow = 2) {
 
 function buildBaseComputedFormulas_(ss) {
   const r = key => baseColumnRange_(ss, key);
+  const launchDate = r('date');
   const item = r('item_name');
   const uuid = r('uuid');
   const destination = r('destination');
@@ -41,6 +42,7 @@ function buildBaseComputedFormulas_(ss) {
     status: `=BYROW(HSTACK(${item};${stageRanges.join(';')});LAMBDA(row;IF(INDEX(row;1;1)="";"";IFNA(INDEX('Настройки'!A$2:A$14;MATCH(FALSE;CHOOSECOLS(row;2;3;4;5;6;7;8;9;10;11;12;13;14);0));"Готово"))))`,
     production_mode: `=ARRAYFORMULA(IF(${item}="";"";IF(IFNA(XLOOKUP(${item};'Цена материалов'!A:A;'Цена материалов'!A:A);"")="";"В производство";"В снабжение")))`,
     supplier: `=ARRAYFORMULA(IF(${item}="";"";IF(${mode}<>"В снабжение";"";IFNA(XLOOKUP(${item};'Цена материалов'!A:A;'Цена материалов'!D:D);""))))`,
+    supplier_request_date: `=MAP(${item};${launchDate};${mode};LAMBDA(item;launch;mode;IF(item="";"";IF(mode<>"В снабжение";"";LET(d;MAXIFS('Импорт снабжения'!C$2:C$5000;'Импорт снабжения'!B$2:B$5000;item;'Импорт снабжения'!A$2:A$5000;">="&INT(launch);'Импорт снабжения'!E$2:E$5000;TRUE);IF(d=0;"";d))))))`,
     salesdrive_id: `=ARRAYFORMULA(IF(${item}="";"";IFNA(XLOOKUP(${item};'SD ID'!B:B;'SD ID'!A:A);"")))`,
 
     // Вместо SUMIF по всему «Снабжение» для каждой строки сначала один раз
