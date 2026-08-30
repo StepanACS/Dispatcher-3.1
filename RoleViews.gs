@@ -27,6 +27,8 @@ const ROLE_VIEW_CONFIG = Object.freeze({
   'Комплектация': {
     extras: ['need_status', 'production_mode', 'salesdrive_id', 'supply_ordered'],
     extraHeaders: { supply_ordered: 'Заказано' },
+    quantityField: 'order_quantity',
+    requireNonBlankFields: ['order_quantity'],
     derived: [{ key: '__completion_percent', header: 'Процент готовности', beforeExtra: 'supply_ordered' }]
   },
   'Склад': {
@@ -65,18 +67,31 @@ function roleViewFieldRange_(ss, fieldKey) {
   return `'${BASE_SHEET_NAME}'!$${letter}$2:$${letter}`;
 }
 
+function roleCommonHeader_(ss, config, fieldKey) {
+  if (config.commonHeaders && config.commonHeaders[fieldKey]) return config.commonHeaders[fieldKey];
+  // На исполнительских листах сохраняем короткое интерфейсное название,
+  // даже если исходное поле «База» называется «Количество на изделие».
+  if (fieldKey === 'quantity') return 'Количество';
+  return baseHeader_(ss, fieldKey);
+}
+
+function roleCommonSourceField_(config, fieldKey) {
+  if (fieldKey === 'quantity' && config.quantityField) return config.quantityField;
+  return fieldKey;
+}
+
 function buildRoleViewProjection_(ss, config) {
   const result = ROLE_VIEW_COMMON_FIELDS.map(key => ({
     key,
-    header: baseHeader_(ss, key),
-    expression: roleViewFieldRange_(ss, key)
+    header: roleCommonHeader_(ss, config, key),
+    expression: roleViewFieldRange_(ss, roleCommonSourceField_(config, key))
   }));
 
   const extras = config.extras || [];
   const derived = config.derived || [];
   for (const key of extras) {
     for (const item of derived.filter(d => d.beforeExtra === key)) {
-      result.push({ key: item.key, header: item.header, expression: roleDerivedExpression_(ss, item.key) });
+      result.push({ key: item.key, header: item.header, expression: roleDerivedExpression_(ss, item.key, config) });
     }
     result.push({
       key,
@@ -85,22 +100,26 @@ function buildRoleViewProjection_(ss, config) {
     });
   }
   for (const item of derived.filter(d => !d.beforeExtra || extras.indexOf(d.beforeExtra) === -1)) {
-    result.push({ key: item.key, header: item.header, expression: roleDerivedExpression_(ss, item.key) });
+    result.push({ key: item.key, header: item.header, expression: roleDerivedExpression_(ss, item.key, config) });
   }
   return result;
 }
 
-function roleDerivedExpression_(ss, key) {
+function roleDerivedExpression_(ss, key, config = {}) {
   if (key === '__completion_percent') {
-    return `IFERROR(${roleViewFieldRange_(ss, 'stock')}/${roleViewFieldRange_(ss, 'quantity')}*100;"")`;
+    const quantityField = config.quantityField || 'quantity';
+    return `IFERROR(${roleViewFieldRange_(ss, 'stock')}/${roleViewFieldRange_(ss, quantityField)}*100;"")`;
   }
   throw new Error(`Неизвестное derived-поле role view: ${key}`);
 }
 
 function buildRoleViewSourceFormula_(ss, sheetName, config) {
   const projection = buildRoleViewProjection_(ss, config);
-  const statusRange = roleViewFieldRange_(ss, 'status');
-  return `=IFNA(FILTER(HSTACK(${projection.map(item => item.expression).join(';')});${statusRange}="${sheetName}");"")`;
+  const conditions = [`${roleViewFieldRange_(ss, 'status')}="${sheetName}"`];
+  for (const fieldKey of config.requireNonBlankFields || []) {
+    conditions.push(`${roleViewFieldRange_(ss, fieldKey)}<>""`);
+  }
+  return `=IFNA(FILTER(HSTACK(${projection.map(item => item.expression).join(';')});${conditions.join(';')});"")`;
 }
 
 function roleExtraHeader_(ss, config, fieldKey) {
@@ -134,7 +153,7 @@ function installRoleViews_(ss) {
     }
 
     // Common visible projection A:J.
-    sheet.getRange(1, 1, 1, 10).setValues([ROLE_VIEW_COMMON_FIELDS.map(key => baseHeader_(ss, key))]);
+    sheet.getRange(1, 1, 1, 10).setValues([ROLE_VIEW_COMMON_FIELDS.map(key => roleCommonHeader_(ss, config, key))]);
     sheet.getRange(2, 1, Math.max(sheet.getMaxRows() - 1, 1), 10).clearContent();
     sheet.getRange('A2').setFormula(`=ARRAYFORMULA(${helperFirstLetter}2:${columnNumberToLetter_(helperFirstCol + 9)})`);
     sheet.getRange(2, 1, Math.max(sheet.getMaxRows() - 1, 1), 1).setNumberFormat('dd.MM.yyyy');
