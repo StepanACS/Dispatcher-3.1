@@ -73,9 +73,16 @@ const ROLE_EDIT_TO_BASE_FIELD = Object.freeze({
   [ROLE_COL_QUANTITY]: 'quantity'
 });
 
+function roleEditFieldKey_(sheet, col) {
+  if (col === ROLE_COL_QUANTITY && sheet && sheet.getName() === 'Комплектация') {
+    return 'order_quantity';
+  }
+  return ROLE_EDIT_TO_BASE_FIELD[col] || '';
+}
+
 /** Переносит ручное изменение с листа роли в соответствующее семантическое поле «База». */
 function handleNote(ss, sheet, range, row, col, val) {
-  const fieldKey = ROLE_EDIT_TO_BASE_FIELD[col];
+  const fieldKey = roleEditFieldKey_(sheet, col);
   if (!fieldKey) return;
 
   const value = String(val ?? '').trim();
