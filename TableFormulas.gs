@@ -36,6 +36,7 @@ function buildBaseComputedFormulas_(ss) {
   return Object.freeze({
     drawing_link: `=ARRAYFORMULA(IF(${item}="";"";LET(link;IFNA(XLOOKUP(${item};'Каталог ссылок'!A:A;'Каталог ссылок'!B:B);"§MISS§");IF(link="§MISS§";"Добавить изделие в каталог ссылок";IF(link="";"Добавить ссылку в каталог";link)))))`,
     order_link: `=ARRAYFORMULA(IF(${item}="";"";LET(link;IFNA(XLOOKUP(${item};'Каталог ссылок'!A:A;'Каталог ссылок'!C:C);"§MISS§");IF(link="§MISS§";"Добавить изделие в каталог ссылок";IF(link="";"Добавить ссылку в каталог";link)))))`,
+    minimum_batch: `=ARRAYFORMULA(IF(${item}="";"";IFNA(XLOOKUP(${item};'Каталог ссылок'!A:A;'Каталог ссылок'!D:D);"")))`,
     stock: `=ARRAYFORMULA(IF(${item}="";"";IFNA(XLOOKUP(${item};'Остатки'!A:A;'Остатки'!B:B);0)))`,
     deficit: `=ARRAYFORMULA(IF(${item}="";"";IF(${quantity}-${stock}<0;0;${quantity}-${stock})))`,
     need_flag: `=ARRAYFORMULA(IF(${item}="";"";IF(${deficit}>0;"Да";"Нет")))`,
