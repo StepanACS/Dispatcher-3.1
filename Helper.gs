@@ -1,3 +1,34 @@
+/**
+ * Совместимость с промежуточной ручной синхронизацией bound Apps Script.
+ *
+ * В новой архитектуре стабильные номера колонок исполнительских листов A:J
+ * объявлены в Config.gs как ROLE_COL_*. Если Helper.gs обновлён раньше Config.gs,
+ * Apps Script раньше падал ещё при загрузке проекта на вычислении
+ * ROLE_EDIT_TO_BASE_FIELD. Подставляем те же стабильные значения в globalThis,
+ * только когда соответствующего глобального свойства ещё нет.
+ *
+ * При актуальном Config.gs его const-значения остаются источником истины для
+ * обычных обращений по идентификатору; эти свойства лишь страхуют частичный sync.
+ */
+(function ensureRoleColumnCompatibility_() {
+  const defaults = {
+    ROLE_COL_DATE: 1,
+    ROLE_COL_DRAWING: 2,
+    ROLE_COL_ORDER_LINK: 3,
+    ROLE_COL_UUID: 4,
+    ROLE_COL_ITEMNAME: 5,
+    ROLE_COL_DESTINATION: 6,
+    ROLE_COL_NOTE: 7,
+    ROLE_COL_QUANTITY: 8,
+    ROLE_COL_STOCK: 9,
+    ROLE_COL_DEFICIT: 10,
+    ROLE_HELPER_FIRST_COLUMN: 53
+  };
+  for (const [name, value] of Object.entries(defaults)) {
+    if (typeof globalThis[name] === 'undefined') globalThis[name] = value;
+  }
+})();
+
 /** Создаёт устанавливаемый onEdit-триггер, если такого триггера ещё нет. */
 function installEditTrigger() {
   const existing = ScriptApp.getProjectTriggers().some(trigger =>
