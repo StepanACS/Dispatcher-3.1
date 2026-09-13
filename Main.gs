@@ -3,20 +3,22 @@
  *
  * Одиночное событие при свободном процессоре выполняется напрямую через
  * e.source без PropertiesService/openById. FIFO-очередь остаётся fallback для
- * параллельных/накопившихся событий и сохраняет их от потери.
+ * параллельных/накопившихся событий. Идентичность строки фиксируется по UUID,
+ * а не по физическому номеру строки динамического FILTER-листа.
  */
 
 const EDIT_QUEUE_CFG = {
-  EVENT_PREFIX: 'EDIT_QUEUE_V2_EVENT_',
-  HEAD_KEY: 'EDIT_QUEUE_V2_HEAD',
-  TAIL_KEY: 'EDIT_QUEUE_V2_TAIL',
-  MAX_QUEUE_LEN: 300,
+  EVENT_PREFIX: 'EDIT_QUEUE_V3_EVENT_',
+  HEAD_KEY: 'EDIT_QUEUE_V3_HEAD',
+  TAIL_KEY: 'EDIT_QUEUE_V3_TAIL',
+  MAX_QUEUE_LEN: 1000,
   ENQUEUE_LOCK_WAIT_MS: 5000,
   QUEUE_LOCK_WAIT_MS: 5000,
   PROCESS_LOCK_WAIT_MS: 500,
   FAST_PATH_LOCK_WAIT_MS: 25,
   FAST_PATH_QUEUE_LOCK_WAIT_MS: 50,
   DRAIN_TIME_LIMIT_MS: 240000,
+  CONTINUATION_DELAY_MS: 1000,
   PERF_LOG_THRESHOLD_MS: 500
 };
 
@@ -157,6 +159,20 @@ function getStatusItemName_(ss, sheet, row, sheetName) {
   }
 }
 
+/** Фиксирует логическую идентичность строки в момент исходного edit. */
+function captureEditIdentity_(ss, sheet, row, sheetName) {
+  if (sheetName === 'Запуск') {
+    return { launchData: sheet.getRange(row, 1, 1, 4).getValues()[0] };
+  }
+  try {
+    const uuidColumn = sheetName === BASE_SHEET_NAME ? baseCol_(ss, 'uuid') : ROLE_COL_UUID;
+    return { itemUuid: String(sheet.getRange(row, uuidColumn).getValue() || '').trim() };
+  } catch (error) {
+    Logger.log(`captureEditIdentity_: ${error.message}`);
+    return {};
+  }
+}
+
 function buildStatusLabel_(actionName, itemName) {
   if (!actionName) return '';
   return itemName ? `${actionName}: «${itemName}»` : actionName;
@@ -216,35 +232,39 @@ function onEditHandler(e) {
 
   try {
     const range = e.range;
+    if (range.getNumRows() !== 1 || range.getNumColumns() !== 1) {
+      Logger.log(`onEditHandler: многоклеточное редактирование ${range.getA1Notation()} не обрабатывается автоматически.`);
+      return;
+    }
+
     const sheet = range.getSheet();
     const spreadsheet = e.source || sheet.getParent();
     setDispatcherRuntimeSpreadsheet_(spreadsheet);
     const rawValue = (typeof e.value !== 'undefined') ? e.value : range.getValue();
-    const actionName = getTrackedActionName_(spreadsheet, sheet.getName(), range.getColumn(), rawValue);
-    const itemName = actionName
-      ? getStatusItemName_(spreadsheet, sheet, range.getRow(), sheet.getName())
-      : '';
+    const sheetName = sheet.getName();
+    const actionName = getTrackedActionName_(spreadsheet, sheetName, range.getColumn(), rawValue);
+    const itemName = actionName ? getStatusItemName_(spreadsheet, sheet, range.getRow(), sheetName) : '';
+    const identity = captureEditIdentity_(spreadsheet, sheet, range.getRow(), sheetName);
 
     const payload = {
       ts: Date.now(),
       id: Utilities.getUuid(),
       spreadsheetId: spreadsheet.getId(),
-      sheetName: sheet.getName(),
+      sheetName,
       a1Notation: range.getA1Notation(),
       row: range.getRow(),
       column: range.getColumn(),
       value: rawValue,
+      ...identity,
       trackStatus: Boolean(actionName),
       statusLabel: buildStatusLabel_(actionName, itemName)
     };
 
-    // Нормальный одиночный клик не проходит через PropertiesService/openById.
-    // Если процессор занят или уже есть backlog, событие уходит в прежнюю FIFO.
     if (tryFastEditPath_(payload, spreadsheet)) return;
 
     if (!enqueueEditEvent_(payload)) {
       Logger.log(`onEditHandler: не удалось поставить событие ${payload.id} в очередь.`);
-      if (payload.trackStatus) showActionStatus_(spreadsheet, 'error', payload.statusLabel, 'Не удалось поставить задачу в очередь.');
+      if (payload.trackStatus) showActionStatus_(spreadsheet, 'error', payload.statusLabel, 'Очередь переполнена или недоступна.');
       return;
     }
     if (payload.trackStatus) showActionStatus_(spreadsheet, 'queued', payload.statusLabel);
@@ -282,9 +302,6 @@ function tryFastEditPath_(payload, spreadsheet) {
   try {
     if (!isEditQueueEmpty_()) return false;
     executeEditPayload_(payload, spreadsheet, 'FAST');
-
-    // Если пока выполнялся fast-path пришли параллельные события, обработаем их
-    // тем же процессором сразу после текущего, не оставляя до следующего onEdit.
     drainEditQueueLocked_(spreadsheet, Date.now());
     return true;
   } finally {
@@ -300,12 +317,12 @@ function enqueueEditEvent_(payload) {
     let head = queuePosition_(props, EDIT_QUEUE_CFG.HEAD_KEY, 1);
     let tail = queuePosition_(props, EDIT_QUEUE_CFG.TAIL_KEY, 0);
     if (head < 1 || tail < head - 1) { head = 1; tail = 0; }
+    if (tail - head + 1 >= EDIT_QUEUE_CFG.MAX_QUEUE_LEN) {
+      Logger.log(`[QUEUE] очередь заполнена (${EDIT_QUEUE_CFG.MAX_QUEUE_LEN}); событие не удаляется молча.`);
+      return false;
+    }
     tail += 1;
     props.setProperty(queueEventKey_(tail), JSON.stringify(payload));
-    while (tail - head + 1 > EDIT_QUEUE_CFG.MAX_QUEUE_LEN) {
-      props.deleteProperty(queueEventKey_(head));
-      head += 1;
-    }
     props.setProperties({
       [EDIT_QUEUE_CFG.HEAD_KEY]: String(head),
       [EDIT_QUEUE_CFG.TAIL_KEY]: String(tail)
@@ -326,6 +343,20 @@ function tryProcessEditQueue_(sourceSpreadsheet) {
   }
 }
 
+function scheduleEditQueueContinuation_() {
+  const exists = ScriptApp.getProjectTriggers().some(t => t.getHandlerFunction() === 'processQueuedEdits_');
+  if (!exists) ScriptApp.newTrigger('processQueuedEdits_').timeBased().after(EDIT_QUEUE_CFG.CONTINUATION_DELAY_MS).create();
+}
+
+function processQueuedEdits_() {
+  // Одноразовый continuation trigger удаляет себя перед обработкой; если лимит снова
+  // будет достигнут, drainEditQueueLocked_ создаст следующий.
+  ScriptApp.getProjectTriggers()
+    .filter(t => t.getHandlerFunction() === 'processQueuedEdits_')
+    .forEach(t => ScriptApp.deleteTrigger(t));
+  tryProcessEditQueue_(null);
+}
+
 function drainEditQueueLocked_(sourceSpreadsheet, startedAt) {
   while (Date.now() - startedAt <= EDIT_QUEUE_CFG.DRAIN_TIME_LIMIT_MS) {
     const next = dequeueOneEvent_();
@@ -340,7 +371,8 @@ function drainEditQueueLocked_(sourceSpreadsheet, startedAt) {
     }
     executeEditPayload_(next, ss, 'QUEUE');
   }
-  Logger.log('[QUEUE] достигнут лимит времени; оставшиеся события будут обработаны следующим запуском.');
+  Logger.log('[QUEUE] достигнут лимит времени; назначено автоматическое продолжение.');
+  scheduleEditQueueContinuation_();
 }
 
 function dequeueOneEvent_() {
@@ -383,6 +415,14 @@ function isTrueEditValue_(value) {
   return value === true || String(value).toUpperCase() === 'TRUE';
 }
 
+/** Возвращает актуальную строку события по UUID после возможного сдвига FILTER. */
+function resolveEventRow_(ss, sheet, eventData) {
+  const itemUuid = String(eventData.itemUuid || '').trim();
+  if (!itemUuid || eventData.sheetName === 'Запуск') return eventData.row;
+  if (eventData.sheetName === BASE_SHEET_NAME) return findBaseRowByUuid_(sheet, itemUuid);
+  return findRowById(sheet, itemUuid);
+}
+
 function mainEditLogic(eventData, openedSpreadsheet) {
   if (!eventData || !eventData.spreadsheetId || !eventData.sheetName) {
     throw new Error('mainEditLogic: неполные данные события.');
@@ -390,7 +430,6 @@ function mainEditLogic(eventData, openedSpreadsheet) {
   const ss = openedSpreadsheet || SpreadsheetApp.openById(eventData.spreadsheetId);
   setDispatcherRuntimeSpreadsheet_(ss);
   const sheetName = eventData.sheetName;
-  const row = eventData.row;
   const col = eventData.column;
   const val = eventData.value;
   const isTrue = isTrueEditValue_(val);
@@ -399,9 +438,19 @@ function mainEditLogic(eventData, openedSpreadsheet) {
     Logger.log(`mainEditLogic: лист «${sheetName}» не найден.`);
     return false;
   }
+
+  if (sheetName === 'Запуск') {
+    const range = sheet.getRange(eventData.row, col);
+    return handleLaunchEvent_(ss, sheet, range, eventData.row, col, isTrue, eventData.launchData || null);
+  }
+
+  const row = resolveEventRow_(ss, sheet, eventData);
+  if (!row) {
+    Logger.log(`mainEditLogic: UUID ${eventData.itemUuid || ''} больше не находится на листе «${sheetName}»; событие считаем устаревшим.`);
+    return true;
+  }
   const range = sheet.getRange(row, col);
 
-  if (sheetName === 'Запуск') return handleLaunchEvent_(ss, sheet, range, row, col, isTrue);
   if (sheetName === 'Развертывание спецификации') return handleDeploymentSheetEvent_(ss, sheet, range, row, col, val, isTrue);
   if (sheetName === BASE_SHEET_NAME) return handleBaseEdit_(ss, sheet, range, row, col, val, isTrue);
 
@@ -410,17 +459,17 @@ function mainEditLogic(eventData, openedSpreadsheet) {
   return Boolean(handleNewSheetEdit(ss, sheet, row, col, val));
 }
 
-function handleLaunchEvent_(ss, sheet, range, row, col, isTrue) {
+function handleLaunchEvent_(ss, sheet, range, row, col, isTrue, launchData) {
   if (col !== COL_LAUNCH_TRIGGER || !isTrue) return false;
-  const launchData = sheet.getRange(row, 1, 1, 3).getValues()[0];
-  const itemName = String(launchData[0] ?? '').trim();
-  const quantity = String(launchData[2] ?? '').trim();
+  const data = Array.isArray(launchData) ? launchData : sheet.getRange(row, 1, 1, 4).getValues()[0];
+  const itemName = String(data[0] ?? '').trim();
+  const quantity = String(data[2] ?? '').trim();
   if (!itemName || !quantity) {
     ss.toast('Недостаточно данных для внесения изделия в базу данных Диспетчера', 'Ошибка', 5);
-    range.setValue(false);
+    if (row <= sheet.getMaxRows()) range.setValue(false);
     return false;
   }
-  handleLaunchEdit(ss, sheet, row);
+  handleLaunchSnapshot_(ss, sheet, data, row);
   return true;
 }
 
@@ -459,9 +508,6 @@ function handleRoleSheetEdit_(ss, sheet, range, row, col, val, isTrue, config) {
   }
   if (col !== COL_CHECKBOX || !isTrue) return false;
 
-  // Validation K/L уже постоянно установлена installRoleViews_(). После записи
-  // даты статус пересчитается сам; искать строку на следующем листе и делать
-  // принудительный SpreadsheetApp.flush() больше не требуется.
   const itemId = runRoleCompletion_(config.completion, ss, sheet, range, row, col, val);
   return Boolean(itemId);
 }
@@ -494,8 +540,10 @@ function handleBaseEdit_(ss, sheet, range, row, col, val, isTrue) {
   }
 
   if (fieldKey === 'stage_picker') return isTrue ? Boolean(handleSupplyOrder(ss, sheet, range, row)) : false;
+  if (fieldKey === 'stage_picking') return isTrue ? Boolean(handlePickingOrder(ss, sheet, range, row)) : false;
   if (fieldKey === 'stage_stock') return isTrue ? Boolean(handleStock(ss, sheet, range, row)) : false;
   if (fieldKey === 'stage_production_stock') return isTrue ? Boolean(handleProductionStock(ss, sheet, range, row)) : false;
+  if (fieldKey === 'stage_production') return isTrue ? Boolean(handleProduction(ss, sheet, range, row)) : false;
   if (fieldKey === 'stage_acceptance') {
     if (isTrue) {
       ss.toast('Для выполнения приемки перейдите на соответствующий лист', 'Ошибка', 5);
@@ -536,8 +584,6 @@ function handleNewSheetEdit(ss, sheet, row, col, val) {
     return null;
   }
 
-  // Сначала снимаем checkbox на spill-листе, потом меняем статус в «База»,
-  // иначе следующая строка может сдвинуться на те же координаты.
   sheet.getRange(row, COL_CHECKBOX).setValue(false);
   checkboxOk(baseSheet.getRange(baseRow, baseCol_(ss, stageField)));
   return itemId;
@@ -561,7 +607,6 @@ function getSheetToBaseFieldMap_(ss) {
       const currentSheetName = String(settingsRow[0] ?? '').trim();
       const fieldKey = String(settingsRow[1] ?? '').trim();
       if (!currentSheetName || !fieldKey) continue;
-      // Проверяем field_key немедленно: ошибка в Настройках должна быть явной.
       baseCol_(ss, fieldKey);
       result.set(currentSheetName, fieldKey);
     }
