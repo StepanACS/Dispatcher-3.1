@@ -1,6 +1,6 @@
 /**
- * Порядок полей архива закреплён семантически и больше не зависит от порядка
- * столбцов «База». Это сохраняет прежний контракт архива A:AE.
+ * Порядок старой части архива закреплён семантически и не зависит от порядка
+ * столбцов «База». Первые 31 поле + цена сохраняют прежний контракт A:AF.
  */
 const ARCHIVE_BASE_FIELD_ORDER = Object.freeze([
   'date', 'drawing_link', 'order_link', 'uuid', 'item_name', 'destination', 'note',
@@ -12,44 +12,89 @@ const ARCHIVE_BASE_FIELD_ORDER = Object.freeze([
   'trello_id', 'salesdrive_order_id', 'actual_made'
 ]);
 
-function handleReady(ss, sheet, range, row) {
-  const baseSheet = ss.getSheetByName(BASE_SHEET_NAME);
-  const archiveSs = SpreadsheetApp.openById(ARCHIVE_SPREADSHEET_ID);
-  const archiveSheet = archiveSs.getSheetByName('Архив');
-  if (!archiveSheet) throw new Error('В архивном документе не найден лист «Архив».');
+// Новая часть добавляется ПОСЛЕ прежней цены и не сдвигает существующие колонки.
+const ARCHIVE_EXT_FIELD_ORDER = Object.freeze([
+  'parent_uuid', 'root_uuid', 'order_quantity', 'minimum_batch',
+  'supplier', 'supplier_request_date', 'manual_status'
+]);
+const ARCHIVE_EXT_HEADERS = Object.freeze([
+  'Родитель ID', 'Первичное назначение ID', 'Количество в заказ', 'Минимальная партия',
+  'Поставщик', 'Дата запроса', 'Статус сотрудника'
+]);
 
-  const roleData = sheet.getRange(row, ROLE_COL_UUID, 1, ROLE_COL_ITEMNAME - ROLE_COL_UUID + 1).getValues()[0];
-  const itemId = String(roleData[0] || '').trim();
-  const itemName = String(roleData[ROLE_COL_ITEMNAME - ROLE_COL_UUID] || '').trim();
-  const baseRow = findBaseRowByUuid_(baseSheet, itemId);
-  if (!baseRow) {
-    Logger.log(`handleReady: UUID ${itemId} не найден в Базе.`);
+function handleReady(ss, sheet, range, row) {
+  const context = resolveActionContext_(ss, sheet, row);
+  if (!context) {
+    Logger.log(`handleReady: не удалось определить строку База для ${sheet.getName()}!${row}.`);
     return null;
   }
 
-  if (sheet.getSheetId() !== baseSheet.getSheetId()) range.setValue(false);
+  const archiveSs = SpreadsheetApp.openById(ARCHIVE_SPREADSHEET_ID);
+  const archiveSheet = archiveSs.getSheetByName('Архив');
+  if (!archiveSheet) throw new Error('В архивном документе не найден лист «Архив».');
+  resetRoleCheckbox_(context, range);
+
+  const stageData = readBaseFields_(context.baseSheet, context.baseRow, ['stage_acceptance', 'stage_ready']);
+  const updates = {};
   const now = new Date();
-  writeBaseFields_(baseSheet, baseRow, {
-    stage_acceptance: now,
-    stage_ready: now
-  });
+  if (!stageData.stage_acceptance) updates.stage_acceptance = now;
+  if (!stageData.stage_ready) updates.stage_ready = now;
+  if (Object.keys(updates).length) writeBaseFields_(context.baseSheet, context.baseRow, updates);
+
+  // status и другие computed-поля должны успеть пересчитаться перед снимком архива.
   SpreadsheetApp.flush();
 
-  const data = readBaseFields_(baseSheet, baseRow, ARCHIVE_BASE_FIELD_ORDER);
-  const archiveValues = ARCHIVE_BASE_FIELD_ORDER.map(key => data[key]);
-  const trelloId = data.trello_id;
+  const alreadyArchivedRow = findArchiveRowByUuid_(archiveSheet, context.itemId);
+  if (!alreadyArchivedRow) {
+    const allFields = [...ARCHIVE_BASE_FIELD_ORDER, ...ARCHIVE_EXT_FIELD_ORDER];
+    const data = readBaseFields_(context.baseSheet, context.baseRow, allFields);
+    const archiveValues = ARCHIVE_BASE_FIELD_ORDER.map(key => data[key]);
+
+    // В тестовом Диспетчере сохраняем реальную архивную операцию, но делаем её
+    // очевидной сотруднику, не меняя layout старых колонок.
+    const noteIndex = ARCHIVE_BASE_FIELD_ORDER.indexOf('note');
+    if (isTestDispatcher_(ss) && noteIndex >= 0) {
+      archiveValues[noteIndex] = markExternalTestText_(ss, archiveValues[noteIndex]);
+    }
+
+    const price = fetchPrice_(context.itemName);
+    const extraValues = ARCHIVE_EXT_FIELD_ORDER.map(key => data[key]);
+    ensureArchiveExtension_(archiveSheet);
+    const archiveRow = archiveSheet.getLastRow() + 1;
+    archiveSheet.getRange(archiveRow, 1, 1, archiveValues.length + 1 + extraValues.length)
+      .setValues([[...archiveValues, price, ...extraValues]]);
+  }
+
+  const trelloId = String(readBaseFields_(context.baseSheet, context.baseRow, ['trello_id']).trello_id || '').trim();
   const trelloClosed = closeTrelloCard(trelloId);
   if (trelloId && !trelloClosed) {
     ss.toast('Не удалось архивировать карточку Trello. Проверьте её вручную.', 'Внимание', 8);
   }
 
-  const price = fetchPrice_(itemName);
-  const archiveRow = archiveSheet.getLastRow() + 1;
-  archiveSheet.getRange(archiveRow, 1, 1, archiveValues.length + 1).setValues([[...archiveValues, price]]);
+  // Архив подтверждён — теперь можно очистить первичную строку.
+  clearBaseRawRow_(context.baseSheet, context.baseRow);
+  return context.itemId;
+}
 
-  // Не удаляем физическую строку: строка 2 содержит spill-якоря вычисляемых полей.
-  clearBaseRawRow_(baseSheet, baseRow);
-  return itemId;
+function findArchiveRowByUuid_(archiveSheet, itemId) {
+  const target = String(itemId || '').trim();
+  if (!target) return null;
+  const lastRow = archiveSheet.getLastRow();
+  if (lastRow < 2) return null;
+  const match = archiveSheet.getRange(2, 4, lastRow - 1, 1)
+    .createTextFinder(target).matchEntireCell(true).findNext();
+  return match ? match.getRow() : null;
+}
+
+function ensureArchiveExtension_(archiveSheet) {
+  const legacyWidthWithPrice = ARCHIVE_BASE_FIELD_ORDER.length + 1;
+  const requiredWidth = legacyWidthWithPrice + ARCHIVE_EXT_HEADERS.length;
+  if (archiveSheet.getMaxColumns() < requiredWidth) {
+    archiveSheet.insertColumnsAfter(archiveSheet.getMaxColumns(), requiredWidth - archiveSheet.getMaxColumns());
+  }
+  const range = archiveSheet.getRange(1, legacyWidthWithPrice + 1, 1, ARCHIVE_EXT_HEADERS.length);
+  const existing = range.getDisplayValues()[0];
+  if (existing.every(value => !String(value || '').trim())) range.setValues([ARCHIVE_EXT_HEADERS]);
 }
 
 function fetchPrice_(itemName) {
@@ -62,8 +107,4 @@ function fetchPrice_(itemName) {
     .createTextFinder(String(itemName || '').trim())
     .matchCase(true).matchEntireCell(true).findNext();
   return match ? dbSheet.getRange(match.getRow(), 3).getValue() : 0;
-}
-
-function fetchAndAppendPrice(itemName, archiveSheet, archiveLastRow, colFactQty) {
-  archiveSheet.getRange(archiveLastRow + 1, colFactQty + 1).setValue(fetchPrice_(itemName));
 }
