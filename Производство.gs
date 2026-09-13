@@ -1,17 +1,19 @@
 function handleProduction(ss, sheet, range, row) {
-  const baseSheet = ss.getSheetByName(BASE_SHEET_NAME);
-  const itemId = String(sheet.getRange(row, ROLE_COL_UUID).getValue() || '').trim();
-  const baseRow = findBaseRowByUuid_(baseSheet, itemId);
-  if (!baseRow) {
-    Logger.log(`handleProduction: UUID ${itemId} не найден в Базе.`);
+  const context = resolveActionContext_(ss, sheet, row);
+  if (!context) {
+    Logger.log(`handleProduction: не удалось определить строку База для ${sheet.getName()}!${row}.`);
     return null;
   }
 
-  if (sheet.getSheetId() !== baseSheet.getSheetId()) range.setValue(false);
-  const now = new Date();
-  writeBaseFields_(baseSheet, baseRow, {
-    stage_production: now,
-    stage_quality_check: now
-  });
-  return itemId;
+  const current = readBaseFields_(context.baseSheet, context.baseRow, ['stage_production']).stage_production;
+  if (current) {
+    resetRoleCheckbox_(context, range);
+    return context.itemId;
+  }
+
+  resetRoleCheckbox_(context, range);
+  // Завершение производства должно переводить изделие НА этап ОТК, а не
+  // автоматически завершать и ОТК. stage_quality_check отмечается только на ОТК.
+  writeBaseFields_(context.baseSheet, context.baseRow, { stage_production: new Date() });
+  return context.itemId;
 }
