@@ -10,10 +10,20 @@ function handleStock(ss, sheet, range, row) {
     return null;
   }
 
-  const data = readBaseFields_(baseSheet, baseRow, ['destination', 'quantity']);
-  const purpose = normalizeDestination(String(data.destination || '').trim());
-  const cardId = createTrelloCard(itemName, data.quantity, purpose);
-  writeBaseFields_(baseSheet, baseRow, { trello_id: cardId });
+  const data = readBaseFields_(baseSheet, baseRow, [
+    'destination', 'quantity', 'trello_id', 'stage_stock'
+  ]);
+  if (data.stage_stock) {
+    if (sheet.getSheetId() !== baseSheet.getSheetId()) range.setValue(false);
+    return itemId;
+  }
+
+  let cardId = String(data.trello_id || '').trim();
+  if (!cardId) {
+    const purpose = normalizeDestination(String(data.destination || '').trim());
+    cardId = createTrelloCard(ss, itemId, itemName, data.quantity, purpose);
+    writeBaseFields_(baseSheet, baseRow, { trello_id: cardId });
+  }
 
   if (sheet.getSheetId() !== baseSheet.getSheetId()) range.setValue(false);
   checkboxOk(baseSheet.getRange(baseRow, baseCol_(ss, 'stage_stock')));
