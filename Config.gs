@@ -26,11 +26,35 @@ const ROLE_HELPER_FIRST_COLUMN = 53; // BA
 const CATALOG_COL_ITEMNAME = 1;
 const CATALOG_COL_LINK = 3;
 
+// Таблицы самого Диспетчера. Среда определяется по ID, а не по имени файла.
+const DISPATCHER_PRODUCTION_SPREADSHEET_ID = '1JTr3AFm5Q1ycipTsrC5qY-SGKWY3v_w_2Jgfhq2xHgU';
+const DISPATCHER_TEST_SPREADSHEET_ID = '1qcl4mumcHdxUmWCV4Cyl0eAb1bK4vTJ2GVm4EyPdQeQ';
+const TEST_EXTERNAL_MARKER = '[TEST Dispatcher 3.1]';
+
 // Внешние таблицы. Все ID собраны здесь, чтобы они не были размазаны по handlers.
-const MAIN_CATALOG_SHEET_ID = '1JTr3AFm5Q1ycipTsrC5qY-SGKWY3v_w_2Jgfhq2xHgU';
+const MAIN_CATALOG_SHEET_ID = DISPATCHER_PRODUCTION_SPREADSHEET_ID;
 const SUPPLY_SPREADSHEET_ID = '1j_5fbonKWN5O5F7EeHDRjanm5d-fhWR0K2m2SO_EvSc';
 const ARCHIVE_SPREADSHEET_ID = '1oPsmDHUGmN0ZmzYbEMp137Px_KsxDcZRx4PhceUp-3g';
 const PRICE_DB_SPREADSHEET_ID = '1wR3wybH7UplH0ogrrELf1S27N9O5t5DS9lIkBHeagJ8';
+
+function getDispatcherEnvironment_(ss) {
+  const spreadsheet = ss || getDispatcherRuntimeSpreadsheet_();
+  const id = spreadsheet && spreadsheet.getId ? spreadsheet.getId() : '';
+  if (id === DISPATCHER_PRODUCTION_SPREADSHEET_ID) return 'PROD';
+  if (id === DISPATCHER_TEST_SPREADSHEET_ID) return 'TEST';
+  // Любая неизвестная копия считается тестовой: безопаснее явно пометить внешнее действие.
+  return 'TEST';
+}
+
+function isTestDispatcher_(ss) {
+  return getDispatcherEnvironment_(ss) !== 'PROD';
+}
+
+function markExternalTestText_(ss, text) {
+  const value = String(text || '').trim();
+  if (!isTestDispatcher_(ss)) return value;
+  return value ? `${TEST_EXTERNAL_MARKER} ${value}` : TEST_EXTERNAL_MARKER;
+}
 
 // Firestore.
 const PRODUCTS_COLLECTION = 'Products';
