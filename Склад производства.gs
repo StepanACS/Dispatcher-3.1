@@ -1,29 +1,28 @@
 function handleProductionStock(ss, sheet, range, row) {
-  
-  const baseSheet = ss.getSheetByName("База");
-  const itemId = sheet.getRange(row, 4).getValue().toString().trim();
-  const itemName = sheet.getRange(row, 5).getValue().toString().trim();
-   
-  Logger.log(`[${new Date().toLocaleString()}] Запуск обработки склада производства, строка ${row}, изделие: "${itemName}"`);
-  
- // Поиск строки в "База" по itemId
-  const baseRow = findRowById(baseSheet, itemId); 
-
-  //Получаем идентификатор заказ из SalesDrive из столбца AB
-  const sdOrderId = baseSheet.getRange(baseRow, COL_SD_ORDER_ID).getValue();
- 
-  changeSdStatus(sdOrderId, 23)//меняем статус заказа в СД, 23 - статус Передано в производство
-
-  handleUndeployment(ss, sheet, row);
-
-  // Сбрасываем исходный чекбокс, если изменение произошло вне "База"
-  if (sheet != baseSheet){
-    range.setValue(false);
+  let context = resolveActionContext_(ss, sheet, row);
+  if (!context) {
+    Logger.log(`handleProductionStock: не удалось определить строку База для ${sheet.getName()}!${row}.`);
+    return null;
   }
-  checkboxOk(baseSheet.getRange(baseRow, COL_PRODUCTION_STOCK)); //Ставим отметку о выполнении на листе База
-  return itemId;
+
+  const data = readBaseFields_(context.baseSheet, context.baseRow, [
+    'salesdrive_order_id', 'stage_production_stock'
+  ]);
+  if (data.stage_production_stock) {
+    resetRoleCheckbox_(context, range);
+    return context.itemId;
+  }
+
+  if (data.salesdrive_order_id) changeSdStatus(data.salesdrive_order_id, 23);
+  resetRoleCheckbox_(context, range);
+
+  removeSpecification(context.itemId, ss);
+  const baseRowAfter = findBaseRowByUuid_(context.baseSheet, context.itemId);
+  if (!baseRowAfter) {
+    Logger.log(`handleProductionStock: корневая строка ${context.itemId} не найдена после сворачивания.`);
+    return null;
+  }
+
+  checkboxOk(context.baseSheet.getRange(baseRowAfter, baseCol_(ss, 'stage_production_stock')));
+  return context.itemId;
 }
-
-
-
-

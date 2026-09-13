@@ -1,68 +1,86 @@
 ///*********************** Глобальные Константы *************************/
-// Эти константы определяют номера столбцов в листе База (используется 1-индексация)
-const COL_DATE                    = 1;  // Столбец A – Дата создания записи
-const COL_DRAWING                 = 2;  // Столбец B – Ссылка на КД
-const COL_LINK                    = 3;  // Столбец C – Ссылка на наряд
-const COL_UUID                    = 4;  // Столбец D – Уникальный идентификатор (UUID)
-const COL_ITEMNAME                = 5;  // Столбец E – Название изделия (ключовое поле)
-const COL_DESTINATION             = 6;  // Столбец F – Назначение
-const COL_NOTE                    = 7;  // Столбец G – Примечание
-const COL_QUANTITY                = 8;  // Столбец H – Количество изделий
-const COL_IN_STOCK                = 9;  // Столбец I – Количество на складе
-const COL_DEFICIT                 = 10; // Столбец J – Дефицит
-const COL_READY_FOR_PRODUCTION    = 11; // Столбец K – Готовность к производству
-const COL_IS_NEED                 = 12; // Столбец L – Есть ли потребность
-const COL_DESIGN                  = 13; // Столбец M – Наличие КД
-const COL_TECHNICAL_CONTROL       = 14; // Столбец N – Отметка о выполнении технического контроля после проектирования
-const COL_DEPLOYMENT              = 15; // Столбец O – Отметка о развертывании спецификации на листе "База"
-const COL_TECHNOLOGIEST           = 16; // Столбец P – Отметка технолога
-const COL_TECHNOLOGY_CHECK        = 17; // Столбец Q – Отметка о проверке технологии
-const COL_PICKER                  = 18; // Столбец R – Отметка о выполнении задачи диспетчера - комплектовщика на листе "База"
-const COL_PICKING                 = 19; // Столбец S – Отметка о комплектации заказа
-const COL_STOCK                   = 20; // Столбец T – Отметка о выполнении задачи склада на листе "База"
-const COL_PRODUCTION_STOCK        = 21; // Столбец U – Отметка о выдаче зарезервированных товаров в производство
-const COL_PRODUCTION              = 22; // Столбец V – Отметка о выполнении задач производства
-const COL_QUALITY_CHECK           = 23; // Столбец W – Отметка о выполнении ОТК
-const COL_ACCEPTANCE              = 24; // Столбец X – Отметка о приемке изделий с фиксацией фактического количества
-const COL_READY                   = 25; // Столбец Y – Отметка о передаче в архив (Готово) на листе "База"
-const COL_STATUS                  = 26; // Столбец Z – Статус - на каком этапе обработки находится строка
-const COL_MODE                    = 27; // Столбец AA – Способ получения ("В производство" или "В снабжение")
-const COL_SDID                    = 28; // Столбец AB – Уникальный идентификатор из системы SalesDrive
-const COL_TRELLO_ID               = 29; // Столбец AC – Уникальный идентификатор карточки в Trello
-const COL_SD_ORDER_ID             = 30; // Столбец AD – Уникальный идентификатор заказа в системе SalesDrive
-const COL_FACT_QTY                = 31; // Столбец AE – Фактически принятое количество
 
-const COL_TECHNOLOGIEST_NAME      = 32; // Столбец AF – Имя технолога
-const COL_DESIGNER_NAME           = 33; // Столбец AG – Имя конструктора
-const COL_SUPPLY_ORDERED          = 34; // Столбец AH – Заказано в снабжении
-const COL_TIED_CAPITAL            = 35; // Столбец AI – Связанный капитал
-const COL_QTY_SD                  = 36; // Столбец AJ – Количество из СД
-const COL_ABC_CATEGORY            = 37; // Столбец AK – Категория из ABC анализа
-const COL_PRIORITY                = 38; // Столбец AL – Приоритет в производстве
-const COL_EQIPMENT                = 39; // Столбец AM – Оснастка
-const COL_DEADLINE                = 40; // Столбец AN – Срок сдачи продукции
+/**
+ * ВАЖНО: номера ниже относятся только к стабильному пользовательскому интерфейсу
+ * листов исполнителей A:L. Лист «База» НЕ имеет фиксированных COL_*: его поля
+ * разрешаются по field_key через TableArchitecture.gs.
+ */
+const ROLE_COL_DATE             = 1;  // A
+const ROLE_COL_DRAWING          = 2;  // B
+const ROLE_COL_ORDER_LINK       = 3;  // C
+const ROLE_COL_UUID             = 4;  // D
+const ROLE_COL_ITEMNAME         = 5;  // E
+const ROLE_COL_DESTINATION      = 6;  // F
+const ROLE_COL_NOTE             = 7;  // G
+const ROLE_COL_QUANTITY         = 8;  // H
+const ROLE_COL_STOCK            = 9;  // I
+const ROLE_COL_DEFICIT          = 10; // J
+const COL_CHECKBOX              = 11; // K
+const COL_RETURN_CHECKBOX       = 12; // L
+const COL_LAUNCH_TRIGGER        = 5;  // E на листе «Запуск»
 
-var LAST_BASE_COLUMN              = 40; // Столбец AF – Последний используемый столбец
+// Служебная проекция листов исполнителей находится далеко справа и скрыта.
+const ROLE_HELPER_FIRST_COLUMN = 53; // BA
 
-//Универсальный столбец с чекбоксами на страницах исполнителей
-const COL_CHECKBOX                = 11; // Столбец K – Отметка о готовности на листах исполнителей
-const COL_RETURN_CHECKBOX         = 12; // Столбец L – Чекбокс для отправки изделия на предыдущий этап
+// «Каталог ссылок».
+const CATALOG_COL_ITEMNAME = 1;
+const CATALOG_COL_LINK = 3;
 
-const COL_LAUNCH_TRIGGER          = 5;  //Столбец,в котором находится чекбокс для запуска переноса изделий в Базу
+// Таблицы самого Диспетчера. Среда определяется по ID, а не по имени файла.
+const DISPATCHER_PRODUCTION_SPREADSHEET_ID = '1JTr3AFm5Q1ycipTsrC5qY-SGKWY3v_w_2Jgfhq2xHgU';
+const DISPATCHER_TEST_SPREADSHEET_ID = '1qcl4mumcHdxUmWCV4Cyl0eAb1bK4vTJ2GVm4EyPdQeQ';
+const TEST_EXTERNAL_MARKER = '[TEST Dispatcher 3.1]';
 
-// --- УЧЕТНЫЕ ДАННЫЕ FIRESTORE (из свойств скрипта) ---
-const CLIENT_EMAIL = PropertiesService.getScriptProperties().getProperty('client_email');
-const PRIVATE_KEY = PropertiesService.getScriptProperties().getProperty('private_key').replace(/\\n/g, '\n');
-const PROJECT_ID = PropertiesService.getScriptProperties().getProperty('project_id');
+// Внешние таблицы. Все ID собраны здесь, чтобы они не были размазаны по handlers.
+const MAIN_CATALOG_SHEET_ID = DISPATCHER_PRODUCTION_SPREADSHEET_ID;
+const SUPPLY_SPREADSHEET_ID = '1j_5fbonKWN5O5F7EeHDRjanm5d-fhWR0K2m2SO_EvSc';
+const ARCHIVE_SPREADSHEET_ID = '1oPsmDHUGmN0ZmzYbEMp137Px_KsxDcZRx4PhceUp-3g';
+const PRICE_DB_SPREADSHEET_ID = '1wR3wybH7UplH0ogrrELf1S27N9O5t5DS9lIkBHeagJ8';
 
+function getDispatcherEnvironment_(ss) {
+  const spreadsheet = ss || getDispatcherRuntimeSpreadsheet_();
+  const id = spreadsheet && spreadsheet.getId ? spreadsheet.getId() : '';
+  if (id === DISPATCHER_PRODUCTION_SPREADSHEET_ID) return 'PROD';
+  if (id === DISPATCHER_TEST_SPREADSHEET_ID) return 'TEST';
+  // Любая неизвестная копия считается тестовой: безопаснее явно пометить внешнее действие.
+  return 'TEST';
+}
 
-// Лист "Каталог ссылок"
-const CATALOG_COL_ITEMNAME    = 1;  // Столбец A - Название изделия
-const CATALOG_COL_LINK        = 3;  // Столбец C - Ссылка на спецификацию
+function isTestDispatcher_(ss) {
+  return getDispatcherEnvironment_(ss) !== 'PROD';
+}
 
-// --- КОНСТАНТЫ ДЛЯ FIRESTORE ---
-const PRODUCTS_COLLECTION = 'Products'; // Название коллекции в Firestore
+function markExternalTestText_(ss, text) {
+  const value = String(text || '').trim();
+  if (!isTestDispatcher_(ss)) return value;
+  return value ? `${TEST_EXTERNAL_MARKER} ${value}` : TEST_EXTERNAL_MARKER;
+}
 
-// --- ПРОЧИЕ КОНСТАНТЫ ---
-const MAX_SPEC_DEPTH = 10; // Максимальная глубина рекурсии для спецификаций
-const MAIN_CATALOG_SHEET_ID = "1JTr3AFm5Q1ycipTsrC5qY-SGKWY3v_w_2Jgfhq2xHgU"; // ID вашей таблицы "Каталог ссылок"
+// Firestore.
+const PRODUCTS_COLLECTION = 'Products';
+const MAX_SPEC_DEPTH = 10;
+let _firestoreConfigCache = null;
+
+/**
+ * Читает учётные данные Firestore только тогда, когда Firestore действительно
+ * используется. Обычные onEdit, не связанные с Firestore, ScriptProperties не читают.
+ */
+function getFirestoreConfig_() {
+  if (_firestoreConfigCache) return _firestoreConfigCache;
+
+  const props = PropertiesService.getScriptProperties();
+  const clientEmail = props.getProperty('client_email');
+  const privateKeyRaw = props.getProperty('private_key');
+  const projectId = props.getProperty('project_id');
+
+  if (!clientEmail || !privateKeyRaw || !projectId) {
+    throw new Error('Не заданы обязательные Script Properties для Firestore.');
+  }
+
+  _firestoreConfigCache = {
+    clientEmail,
+    privateKey: privateKeyRaw.replace(/\\n/g, '\n'),
+    projectId
+  };
+  return _firestoreConfigCache;
+}
