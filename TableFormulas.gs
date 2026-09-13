@@ -13,6 +13,11 @@ function baseColumnRange_(ss, fieldKey, startRow = 2) {
 
 function buildBaseComputedFormulas_(ss) {
   const r = key => baseColumnRange_(ss, key);
+  const c = key => baseColumnLetter_(ss, key);
+  // Используется внутри LET(...;last;...): ограничивает тяжёлые массивные операции
+  // последней реально занятой строкой, не фиксируя физический размер «База».
+  const bounded = key => `${c(key)}2:INDEX(${c(key)}:${c(key)};last)`;
+
   const launchDate = r('date');
   const item = r('item_name');
   const uuid = r('uuid');
@@ -38,7 +43,15 @@ function buildBaseComputedFormulas_(ss) {
     order_link: `=ARRAYFORMULA(IF(${item}="";"";LET(link;IFNA(XLOOKUP(${item};'Каталог ссылок'!A:A;'Каталог ссылок'!C:C);"§MISS§");IF(link="§MISS§";"Добавить изделие в каталог ссылок";IF(link="";"Добавить ссылку в каталог";link)))))`,
     minimum_batch: `=ARRAYFORMULA(IF(${item}="";"";IFNA(XLOOKUP(${item};'Каталог ссылок'!A:A;'Каталог ссылок'!D:D);"")))`,
     stock: `=ARRAYFORMULA(IF(${item}="";"";IFNA(XLOOKUP(${item};'Остатки'!A:A;'Остатки'!B:B);0)))`,
-    deficit: `=ARRAYFORMULA(IF(${item}="";"";IF(${quantity}-${stock}<0;0;${quantity}-${stock})))`,
+
+    // Variant B допускает несколько строк одного артикула у разных родителей/root.
+    // Один и тот же складской остаток нельзя вычитать из каждой строки независимо.
+    // Сортируем применения по артикулу и исходной строке, считаем накопительную
+    // потребность одним SCAN, а затем выделяем каждой строке только прирост общего
+    // дефицита. Поэтому сумма deficit по артикулу = MAX(SUM(quantity) - stock; 0).
+    // Тяжёлые операции ограничены последним UUID, а не миллионом строк листа.
+    deficit: `=IFNA(LET(last;MAX(FILTER(ARRAYFORMULA(ROW(${uuid}));${uuid}<>""));items;${bounded('item_name')};qty;${bounded('quantity')};st;${bounded('stock')};rows;ARRAYFORMULA(ROW(items));data;FILTER(HSTACK(items;qty;st;rows);items<>"");s;SORT(data;1;TRUE;4;TRUE);si;CHOOSECOLS(s;1);sq;CHOOSECOLS(s;2);sst;CHOOSECOLS(s;3);sr;CHOOSECOLS(s;4);cum;SCAN(0;sq;LAMBDA(a;v;a+v));base;ARRAYFORMULA(XLOOKUP(si;si;ARRAYFORMULA(cum-sq)));gc;ARRAYFORMULA(cum-base);pgc;ARRAYFORMULA(gc-sq);alloc;ARRAYFORMULA(IF(gc>sst;gc-sst;0)-IF(pgc>sst;pgc-sst;0));back;SORT(HSTACK(sr;alloc);1;TRUE);ARRAYFORMULA(IF(items="";"";IFNA(XLOOKUP(rows;CHOOSECOLS(back;1);CHOOSECOLS(back;2));""))));"")`,
+
     need_flag: `=ARRAYFORMULA(IF(${item}="";"";IF(${deficit}>0;"Да";"Нет")))`,
     status: `=BYROW(HSTACK(${item};${stageRanges.join(';')});LAMBDA(row;IF(INDEX(row;1;1)="";"";IFNA(INDEX('Настройки'!A$2:A$14;MATCH(FALSE;CHOOSECOLS(row;2;3;4;5;6;7;8;9;10;11;12;13;14);0));"Готово"))))`,
     production_mode: `=ARRAYFORMULA(IF(${item}="";"";IF(IFNA(XLOOKUP(${item};'Цена материалов'!A:A;'Цена материалов'!A:A);"")="";"В производство";"В снабжение")))`,
