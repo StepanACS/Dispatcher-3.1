@@ -1,23 +1,28 @@
 function handleProductionStock(ss, sheet, range, row) {
-  const baseSheet = ss.getSheetByName(BASE_SHEET_NAME);
-  const itemId = String(sheet.getRange(row, ROLE_COL_UUID).getValue() || '').trim();
-  let baseRow = findBaseRowByUuid_(baseSheet, itemId);
-  if (!baseRow) {
-    Logger.log(`handleProductionStock: UUID ${itemId} не найден в Базе.`);
+  let context = resolveActionContext_(ss, sheet, row);
+  if (!context) {
+    Logger.log(`handleProductionStock: не удалось определить строку База для ${sheet.getName()}!${row}.`);
     return null;
   }
 
-  const sdOrderId = readBaseFields_(baseSheet, baseRow, ['salesdrive_order_id']).salesdrive_order_id;
-  if (sdOrderId) changeSdStatus(sdOrderId, 23);
-  if (sheet.getSheetId() !== baseSheet.getSheetId()) range.setValue(false);
+  const data = readBaseFields_(context.baseSheet, context.baseRow, [
+    'salesdrive_order_id', 'stage_production_stock'
+  ]);
+  if (data.stage_production_stock) {
+    resetRoleCheckbox_(context, range);
+    return context.itemId;
+  }
 
-  handleUndeployment(ss, sheet, row);
-  baseRow = findBaseRowByUuid_(baseSheet, itemId);
-  if (!baseRow) {
-    Logger.log(`handleProductionStock: корневая строка ${itemId} не найдена после сворачивания.`);
+  if (data.salesdrive_order_id) changeSdStatus(data.salesdrive_order_id, 23);
+  resetRoleCheckbox_(context, range);
+
+  removeSpecification(context.itemId, ss);
+  const baseRowAfter = findBaseRowByUuid_(context.baseSheet, context.itemId);
+  if (!baseRowAfter) {
+    Logger.log(`handleProductionStock: корневая строка ${context.itemId} не найдена после сворачивания.`);
     return null;
   }
 
-  checkboxOk(baseSheet.getRange(baseRow, baseCol_(ss, 'stage_production_stock')));
-  return itemId;
+  checkboxOk(context.baseSheet.getRange(baseRowAfter, baseCol_(ss, 'stage_production_stock')));
+  return context.itemId;
 }
