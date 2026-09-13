@@ -1,21 +1,13 @@
 /** Сворачивает спецификацию изделия, указанного в текущей строке. */
 function handleUndeployment(ss, sheet, row) {
-  const baseSheet = ss.getSheetByName(BASE_SHEET_NAME);
-  let itemId = '';
-  if (sheet.getSheetId() === baseSheet.getSheetId()) {
-    itemId = String(readBaseFields_(baseSheet, row, ['uuid']).uuid || '').trim();
-  } else {
-    itemId = String(sheet.getRange(row, ROLE_COL_UUID).getValue() || '').trim();
-  }
-  if (!itemId) return;
-  removeSpecification(itemId, ss);
+  const context = resolveActionContext_(ss, sheet, row);
+  if (!context) return;
+  removeSpecification(context.itemId, ss);
 }
 
 /**
- * Вариант Б: граф спецификации читается непосредственно из «База.parent_uuid».
+ * Variant B: граф спецификации читается непосредственно из «База.parent_uuid».
  * Выбранная строка сохраняется как узел сборки, а все её потомки очищаются.
- * Благодаря правилу «одна строка = один родитель» никакого перераспределения
- * quantity между несколькими назначениями здесь больше нет.
  */
 function removeSpecification(initialParentUuid, ss) {
   const baseSheet = ss.getSheetByName(BASE_SHEET_NAME);
@@ -26,7 +18,6 @@ function removeSpecification(initialParentUuid, ss) {
 
   const targetUuid = String(initialParentUuid || '').trim();
   if (!targetUuid) return;
-  SpreadsheetApp.flush();
 
   const lastRow = baseLastDataRow_(baseSheet);
   if (lastRow < 2) return;
@@ -56,8 +47,8 @@ function removeSpecification(initialParentUuid, ss) {
 
   const descendants = new Set();
   const queue = [...(childrenByParent.get(targetUuid) || [])];
-  while (queue.length) {
-    const uuid = queue.shift();
+  for (let head = 0; head < queue.length; head++) {
+    const uuid = queue[head];
     if (!uuid || descendants.has(uuid)) continue;
     descendants.add(uuid);
     for (const child of childrenByParent.get(uuid) || []) queue.push(child);
@@ -67,38 +58,5 @@ function removeSpecification(initialParentUuid, ss) {
     .map(uuid => rowByUuid.get(uuid))
     .filter(Boolean);
   clearBaseRawRows_(baseSheet, rowsToClear);
-
-  // Поддерживаем старый лист только как compatibility mirror, пока проверка
-  // повторного развёртывания ещё использует его. Расчёты от него не зависят.
-  if (ss.getSheetByName(SPEC_RELATIONS_SHEET_NAME) && descendants.size) {
-    replaceSpecRelations_(ss, readSpecRelations_(ss).filter(rel =>
-      !descendants.has(rel.childUuid)
-    ));
-  }
-
-  SpreadsheetApp.flush();
   ss.toast('Откат спецификации завершен.', 'Информация', 5);
-}
-
-/** Legacy parser: только для диагностики старых текстовых Назначений. */
-function parseDestinationCell(cellValue) {
-  if (!cellValue) return [];
-  const destinations = [];
-  const lines = String(cellValue).split(/\r?\n/);
-  const regex = /(.+)\s*=\s*(\d+(?:[.,]\d+)?)\s*\(([-\w]{36})\)/;
-  for (const line of lines) {
-    const match = line.trim().match(regex);
-    if (!match) continue;
-    destinations.push({
-      name: match[1].trim(),
-      quantity: parseFloat(match[2].replace(',', '.')),
-      uuid: match[3].trim()
-    });
-  }
-  return destinations;
-}
-
-function formatDestinationCell(destinations) {
-  if (!destinations || !destinations.length) return '';
-  return destinations.map(d => `${d.name} = ${d.quantity} (${d.uuid})`).join('\n');
 }
