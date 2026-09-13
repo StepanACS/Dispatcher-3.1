@@ -10,23 +10,61 @@ function handleSupplyOrder(ss, sheet, range, row) {
     return null;
   }
 
-  const data = readBaseFields_(baseSheet, baseRow, ['destination', 'quantity', 'deficit', 'production_mode']);
+  const data = readBaseFields_(baseSheet, baseRow, [
+    'destination', 'quantity', 'deficit', 'production_mode', 'stage_picker'
+  ]);
+  // Повторное событие после уже выполненного этапа не должно создавать вторую заявку.
+  if (data.stage_picker) {
+    if (sheet.getSheetId() !== baseSheet.getSheetId()) range.setValue(false);
+    return itemId;
+  }
+
   if (data.deficit > 0 && data.production_mode === 'В снабжение') {
-    setSupplyOrder(itemName, data.quantity, String(data.destination || '').trim());
+    setSupplyOrder(ss, itemId, itemName, data.quantity, String(data.destination || '').trim());
   }
   if (sheet.getSheetId() !== baseSheet.getSheetId()) range.setValue(false);
   checkboxOk(baseSheet.getRange(baseRow, baseCol_(ss, 'stage_picker')));
   return itemId;
 }
 
-function setSupplyOrder(name, qty, purpose) {
+function supplyRequestToken_(itemId) {
+  return `[D31:${String(itemId || '').trim()}]`;
+}
+
+/**
+ * Добавляет заявку в реальное «Снабжение». В TEST-среде запись не отключается:
+ * она помечается [TEST Dispatcher 3.1] и UUID исходной строки Диспетчера.
+ * Перед добавлением проверяем существующую ещё не полученную заявку с тем же token.
+ */
+function setSupplyOrder(ss, itemId, name, qty, purpose) {
   const supplySpreadsheet = SpreadsheetApp.openById(SUPPLY_SPREADSHEET_ID);
   const supplySheet = supplySpreadsheet.getSheetByName('Сводный');
   if (!supplySheet) throw new Error('В документе снабжения не найден лист «Сводный».');
+
+  const token = supplyRequestToken_(itemId);
+  const source = markExternalTestText_(ss, 'Script - Диспетчер 3.1');
+  const comment = markExternalTestText_(ss, `${token} ${String(purpose || '').trim()}`.trim());
+
+  const lastRow = supplySheet.getLastRow();
+  if (lastRow >= 2) {
+    // H = комментарий/назначение, M = получено. Повторяем только если предыдущая
+    // заявка с этим UUID уже закрыта получением.
+    const comments = supplySheet.getRange(2, 8, lastRow - 1, 1).getDisplayValues().flat();
+    const received = supplySheet.getRange(2, 13, lastRow - 1, 1).getValues().flat();
+    for (let i = comments.length - 1; i >= 0; i--) {
+      if (!String(comments[i] || '').includes(token)) continue;
+      const receivedValue = received[i];
+      const isReceived = receivedValue instanceof Date ||
+        (typeof receivedValue === 'number' && isFinite(receivedValue) && receivedValue > 0);
+      if (!isReceived) return { created: false, row: i + 2, duplicate: true };
+    }
+  }
+
   const newOrderRow = getLastRowNumber(supplySheet, 2) + 1;
   supplySheet.getRange(newOrderRow, 1, 1, 8).setValues([[
-    new Date(), 'Script - Диспетчер 3.1', qty, name, '', '', '', purpose
+    new Date(), source, qty, name, '', '', '', comment
   ]]);
+  return { created: true, row: newOrderRow, duplicate: false };
 }
 
 function getLastRowNumber(sheet, column) {
