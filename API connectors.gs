@@ -1,13 +1,19 @@
 const SALESDRIVE_FORM_ID = '2HqZ95-RMpEmW2_pOzxtQAkuYrrohkZVLMmtznjzfro0rUNBpiOty5xiQzy6';
 
+function dispatcherExternalId_(itemId) {
+  const id = String(itemId || '').trim();
+  return id ? `D31-${id}` : '';
+}
+
 /** Экспортирует состав заказа в SalesDrive и возвращает ID созданного заказа. */
-function sendPostRequest(products, comment) {
+function sendPostRequest(ss, itemId, products, comment) {
   const payload = {
     form: SALESDRIVE_FORM_ID,
     getResultData: '1',
     products,
-    comment,
-    externalId: '',
+    comment: markExternalTestText_(ss, `${dispatcherExternalId_(itemId)} ${String(comment || '').trim()}`.trim()),
+    // Стабильный UUID позволяет идентифицировать повторную отправку той же строки.
+    externalId: dispatcherExternalId_(itemId),
     fName: '',
     lName: '',
     mName: '',
@@ -45,11 +51,17 @@ function sendPostRequest(products, comment) {
   const response = UrlFetchApp.fetch('https://acs.salesdrive.me/handler/', {
     method: 'post',
     contentType: 'application/json',
-    payload: JSON.stringify(payload)
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
   });
+  if (response.getResponseCode() < 200 || response.getResponseCode() >= 300) {
+    throw new Error(`SalesDrive create HTTP ${response.getResponseCode()}: ${response.getContentText()}`);
+  }
 
   const responseObject = JSON.parse(response.getContentText());
-  return responseObject && responseObject.data ? responseObject.data.orderId : null;
+  const orderId = responseObject && responseObject.data ? responseObject.data.orderId : null;
+  if (!orderId) throw new Error('SalesDrive не вернул orderId созданного заказа.');
+  return orderId;
 }
 
 /** Меняет статус существующего заказа SalesDrive. */
@@ -109,11 +121,21 @@ function changeSdStatus(id, statusId) {
 }
 
 /**
- * Единая точка хранения параметров Trello внутри кода.
- * Отдельным следующим шагом их стоит перенести в Script Properties и перевыпустить
- * token, поскольку он уже присутствует в истории Git.
+ * Trello credentials читаются из Script Properties: trello_api_key,
+ * trello_token, trello_board_id, trello_list_id. Legacy fallback оставлен только
+ * для совместимости существующего bound-проекта до переноса Properties/ротации token.
  */
 function getTrelloCredentials_() {
+  const props = PropertiesService.getScriptProperties();
+  const configured = {
+    apiKey: props.getProperty('trello_api_key'),
+    token: props.getProperty('trello_token'),
+    boardId: props.getProperty('trello_board_id'),
+    listId: props.getProperty('trello_list_id')
+  };
+  if (configured.apiKey && configured.token && configured.boardId && configured.listId) return configured;
+
+  Logger.log('[SECURITY] Trello credentials читаются из legacy fallback. Перенесите их в Script Properties и перевыпустите token.');
   return {
     apiKey: 'c15d1e1174e2b9d45b2fc45629c563e9',
     token: 'ATTA8289839f0b080402baa34f55c6a8b1118d64b693ab64ec78c91a579b528954786E0863A2',
@@ -123,20 +145,27 @@ function getTrelloCredentials_() {
 }
 
 /** Создаёт карточку Trello для производственной задачи. */
-function createTrelloCard(name, qty, destination) {
+function createTrelloCard(ss, itemId, name, qty, destination) {
   const credentials = getTrelloCredentials_();
   const cleanDestination = normalizeDestination(destination);
-  const cardName = `${name} = ${qty} (${cleanDestination})`;
+  const baseName = `${name} = ${qty} (${cleanDestination})`;
+  const cardName = markExternalTestText_(ss, baseName);
+  const description = `${dispatcherExternalId_(itemId)}${isTestDispatcher_(ss) ? `\n${TEST_EXTERNAL_MARKER}` : ''}`;
 
   const url = 'https://api.trello.com/1/cards?key=' + encodeURIComponent(credentials.apiKey) +
     '&token=' + encodeURIComponent(credentials.token) +
     '&idList=' + encodeURIComponent(credentials.listId) +
     '&name=' + encodeURIComponent(cardName) +
-    '&desc=&idBoard=' + encodeURIComponent(credentials.boardId) +
+    '&desc=' + encodeURIComponent(description) +
+    '&idBoard=' + encodeURIComponent(credentials.boardId) +
     '&pos=top';
 
-  const response = UrlFetchApp.fetch(url, { method: 'post' });
+  const response = UrlFetchApp.fetch(url, { method: 'post', muteHttpExceptions: true });
+  if (response.getResponseCode() < 200 || response.getResponseCode() >= 300) {
+    throw new Error(`Trello create HTTP ${response.getResponseCode()}: ${response.getContentText()}`);
+  }
   const responseData = JSON.parse(response.getContentText());
+  if (!responseData.id) throw new Error('Trello не вернул ID созданной карточки.');
   return responseData.id;
 }
 
