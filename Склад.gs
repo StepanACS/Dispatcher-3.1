@@ -1,31 +1,28 @@
 /** Обрабатывает завершение этапа «Склад» и создаёт карточку Trello. */
 function handleStock(ss, sheet, range, row) {
-  const baseSheet = ss.getSheetByName(BASE_SHEET_NAME);
-  const roleData = sheet.getRange(row, ROLE_COL_UUID, 1, ROLE_COL_ITEMNAME - ROLE_COL_UUID + 1).getValues()[0];
-  const itemId = String(roleData[0] || '').trim();
-  const itemName = String(roleData[ROLE_COL_ITEMNAME - ROLE_COL_UUID] || '').trim();
-  const baseRow = findBaseRowByUuid_(baseSheet, itemId);
-  if (!baseRow) {
-    Logger.log(`handleStock: UUID ${itemId} не найден в Базе.`);
+  const context = resolveActionContext_(ss, sheet, row);
+  if (!context) {
+    Logger.log(`handleStock: не удалось определить строку База для ${sheet.getName()}!${row}.`);
     return null;
   }
 
-  const data = readBaseFields_(baseSheet, baseRow, [
+  const data = readBaseFields_(context.baseSheet, context.baseRow, [
     'destination', 'quantity', 'trello_id', 'stage_stock'
   ]);
   if (data.stage_stock) {
-    if (sheet.getSheetId() !== baseSheet.getSheetId()) range.setValue(false);
-    return itemId;
+    resetRoleCheckbox_(context, range);
+    return context.itemId;
   }
 
   let cardId = String(data.trello_id || '').trim();
   if (!cardId) {
     const purpose = normalizeDestination(String(data.destination || '').trim());
-    cardId = createTrelloCard(ss, itemId, itemName, data.quantity, purpose);
-    writeBaseFields_(baseSheet, baseRow, { trello_id: cardId });
+    cardId = createTrelloCard(ss, context.itemId, context.itemName, data.quantity, purpose);
+    if (!cardId) throw new Error('Trello не вернул ID созданной карточки.');
+    writeBaseFields_(context.baseSheet, context.baseRow, { trello_id: cardId });
   }
 
-  if (sheet.getSheetId() !== baseSheet.getSheetId()) range.setValue(false);
-  checkboxOk(baseSheet.getRange(baseRow, baseCol_(ss, 'stage_stock')));
-  return itemId;
+  resetRoleCheckbox_(context, range);
+  checkboxOk(context.baseSheet.getRange(context.baseRow, baseCol_(ss, 'stage_stock')));
+  return context.itemId;
 }
