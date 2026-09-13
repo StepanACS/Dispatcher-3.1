@@ -1,26 +1,22 @@
 function handlePickingOrder(ss, sheet, range, row) {
-  const baseSheet = ss.getSheetByName(BASE_SHEET_NAME);
-  const roleData = sheet.getRange(row, ROLE_COL_UUID, 1, ROLE_COL_ITEMNAME - ROLE_COL_UUID + 1).getValues()[0];
-  const itemId = String(roleData[0] || '').trim();
-  const itemName = String(roleData[ROLE_COL_ITEMNAME - ROLE_COL_UUID] || '').trim();
-  const baseRow = findBaseRowByUuid_(baseSheet, itemId);
-  if (!baseRow) {
-    Logger.log(`handlePickingOrder: UUID ${itemId} не найден в Базе.`);
+  const context = resolveActionContext_(ss, sheet, row);
+  if (!context) {
+    Logger.log(`handlePickingOrder: не удалось определить строку База для ${sheet.getName()}!${row}.`);
     return null;
   }
 
-  const data = readBaseFields_(baseSheet, baseRow, [
+  const data = readBaseFields_(context.baseSheet, context.baseRow, [
     'order_link', 'order_quantity', 'deficit', 'production_mode',
     'salesdrive_order_id', 'stage_picking'
   ]);
   if (data.stage_picking) {
-    if (sheet.getSheetId() !== baseSheet.getSheetId()) range.setValue(false);
-    return itemId;
+    resetRoleCheckbox_(context, range);
+    return context.itemId;
   }
 
   const orderQty = Number(data.order_quantity);
   if (!Number.isFinite(orderQty) || orderQty <= 0) {
-    if (sheet.getSheetId() !== baseSheet.getSheetId()) range.setValue(false);
+    resetRoleCheckbox_(context, range);
     ss.toast('Для комплектации не указано корректное «Количество в заказ».', 'Ошибка', 6);
     return null;
   }
@@ -28,13 +24,20 @@ function handlePickingOrder(ss, sheet, range, row) {
   if (data.deficit > 0 && data.production_mode === 'В производство') {
     let orderId = String(data.salesdrive_order_id || '').trim();
     if (!orderId) {
-      orderId = setSdOrder(ss, itemId, itemName, String(data.order_link || '').trim(), orderQty);
-      writeBaseFields_(baseSheet, baseRow, { salesdrive_order_id: orderId });
+      orderId = setSdOrder(
+        ss,
+        context.itemId,
+        context.itemName,
+        String(data.order_link || '').trim(),
+        orderQty
+      );
+      if (!orderId) throw new Error('SalesDrive не вернул ID созданного заказа.');
+      writeBaseFields_(context.baseSheet, context.baseRow, { salesdrive_order_id: orderId });
     }
   }
-  if (sheet.getSheetId() !== baseSheet.getSheetId()) range.setValue(false);
-  checkboxOk(baseSheet.getRange(baseRow, baseCol_(ss, 'stage_picking')));
-  return itemId;
+  resetRoleCheckbox_(context, range);
+  checkboxOk(context.baseSheet.getRange(context.baseRow, baseCol_(ss, 'stage_picking')));
+  return context.itemId;
 }
 
 function setSdOrder(ss, itemId, itemName, link, itemQty) {
