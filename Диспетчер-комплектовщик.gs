@@ -1,30 +1,32 @@
 /** Обрабатывает завершение этапа «Диспетчер- комплектовщик». */
 function handleSupplyOrder(ss, sheet, range, row) {
-  const baseSheet = ss.getSheetByName(BASE_SHEET_NAME);
-  const roleData = sheet.getRange(row, ROLE_COL_UUID, 1, ROLE_COL_ITEMNAME - ROLE_COL_UUID + 1).getValues()[0];
-  const itemId = String(roleData[0] || '').trim();
-  const itemName = String(roleData[ROLE_COL_ITEMNAME - ROLE_COL_UUID] || '').trim();
-  const baseRow = findBaseRowByUuid_(baseSheet, itemId);
-  if (!baseRow) {
-    Logger.log(`handleSupplyOrder: UUID ${itemId} не найден в Базе.`);
+  const context = resolveActionContext_(ss, sheet, row);
+  if (!context) {
+    Logger.log(`handleSupplyOrder: не удалось определить строку База для ${sheet.getName()}!${row}.`);
     return null;
   }
 
-  const data = readBaseFields_(baseSheet, baseRow, [
+  const data = readBaseFields_(context.baseSheet, context.baseRow, [
     'destination', 'quantity', 'deficit', 'production_mode', 'stage_picker'
   ]);
   // Повторное событие после уже выполненного этапа не должно создавать вторую заявку.
   if (data.stage_picker) {
-    if (sheet.getSheetId() !== baseSheet.getSheetId()) range.setValue(false);
-    return itemId;
+    resetRoleCheckbox_(context, range);
+    return context.itemId;
   }
 
   if (data.deficit > 0 && data.production_mode === 'В снабжение') {
-    setSupplyOrder(ss, itemId, itemName, data.quantity, String(data.destination || '').trim());
+    setSupplyOrder(
+      ss,
+      context.itemId,
+      context.itemName,
+      data.quantity,
+      String(data.destination || '').trim()
+    );
   }
-  if (sheet.getSheetId() !== baseSheet.getSheetId()) range.setValue(false);
-  checkboxOk(baseSheet.getRange(baseRow, baseCol_(ss, 'stage_picker')));
-  return itemId;
+  resetRoleCheckbox_(context, range);
+  checkboxOk(context.baseSheet.getRange(context.baseRow, baseCol_(ss, 'stage_picker')));
+  return context.itemId;
 }
 
 function supplyRequestToken_(itemId) {
