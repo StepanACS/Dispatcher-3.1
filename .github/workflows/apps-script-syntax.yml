@@ -1,4 +1,4 @@
-name: Apps Script syntax
+name: Apps Script checks
 
 on:
   pull_request:
@@ -16,7 +16,7 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Check .gs syntax
+      - name: Check individual .gs syntax
         shell: bash
         run: |
           status=0
@@ -29,3 +29,12 @@ jobs:
             fi
           done < <(find . -type f -name '*.gs' -print0)
           exit "$status"
+
+      - name: Check combined Apps Script global scope
+        shell: bash
+        run: |
+          find . -type f -name '*.gs' -print0 | sort -z | xargs -0 cat > /tmp/apps-script-bundle.js
+          node --check /tmp/apps-script-bundle.js
+
+      - name: Check cross-file project globals
+        run: node .github/check-project-globals.js
