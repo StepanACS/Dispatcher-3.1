@@ -12,48 +12,39 @@ function walk(dir) {
   return result;
 }
 
-function maskStringsAndComments(source) {
-  // Good-enough lexical masking for static name checks. Preserve newlines/length
-  // so diagnostics still point to the correct source line.
-  return source
-    .replace(/\/\*[\s\S]*?\*\//g, m => m.replace(/[^\n]/g, ' '))
-    .replace(/\/\/[^\n]*/g, m => ' '.repeat(m.length))
-    .replace(/`(?:\\.|[^`])*`/gs, m => m.replace(/[^\n]/g, ' '))
-    .replace(/'(?:\\.|[^'\\])*'/g, m => ' '.repeat(m.length))
-    .replace(/"(?:\\.|[^"\\])*"/g, m => ' '.repeat(m.length));
-}
-
 const files = walk('.').sort();
 const sources = files.map(file => ({ file, source: fs.readFileSync(file, 'utf8') }));
 const all = sources.map(x => x.source).join('\n');
-const maskedAll = maskStringsAndComments(all);
 
+// Definitions are intentionally collected from raw source. This checker is a
+// narrow cross-file guard, not a full JS parser; combined `node --check` already
+// validates syntax and duplicate lexical declarations.
 const definitions = new Set();
-for (const match of maskedAll.matchAll(/\bfunction\s+([A-Za-z_$][\w$]*)\s*\(/g)) definitions.add(match[1]);
-for (const match of maskedAll.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\b/g)) definitions.add(match[1]);
+for (const match of all.matchAll(/\bfunction\s+([A-Za-z_$][\w$]*)\s*\(/g)) definitions.add(match[1]);
+for (const match of all.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\b/g)) definitions.add(match[1]);
 
 const errors = [];
 for (const { file, source } of sources) {
-  const masked = maskStringsAndComments(source);
   const localReported = new Set();
 
   // Project-private helpers conventionally end in _. This catches missing
-  // cross-file functions that JavaScript syntax checking cannot see.
-  for (const match of masked.matchAll(/\b([A-Za-z_$][\w$]*_)\s*\(/g)) {
+  // cross-file functions such as handleLaunchSnapshot_ that syntax checking
+  // cannot detect. References inside comments/strings are rare and, if they
+  // occur, should normally name a real project helper anyway.
+  for (const match of source.matchAll(/\b([A-Za-z_$][\w$]*_)\s*\(/g)) {
     const name = match[1];
     if (definitions.has(name) || localReported.has(name)) continue;
     localReported.add(name);
-    const line = masked.slice(0, match.index).split('\n').length;
+    const line = source.slice(0, match.index).split('\n').length;
     errors.push(`${file}:${line}: undefined project helper ${name}`);
   }
 
-  // Stable UI constants caused a real production failure when Helper.gs and
-  // Config.gs were synced partially. Verify every ROLE_COL_/COL_ reference.
-  for (const match of masked.matchAll(/\b((?:ROLE_COL|COL)_[A-Z0-9_]+)\b/g)) {
+  // Stable UI constants caused a real runtime failure after partial file sync.
+  for (const match of source.matchAll(/\b((?:ROLE_COL|COL)_[A-Z0-9_]+)\b/g)) {
     const name = match[1];
     if (definitions.has(name) || localReported.has(name)) continue;
     localReported.add(name);
-    const line = masked.slice(0, match.index).split('\n').length;
+    const line = source.slice(0, match.index).split('\n').length;
     errors.push(`${file}:${line}: undefined project constant ${name}`);
   }
 }
