@@ -7,7 +7,7 @@
  * папки КД. В "Архив" и другие вложенные каталоги НЕ заходим.
  *
  * Выполнить вручную:
- *   startFullSpecificationImport()   - начать новую полную загрузку
+ *   previewFullSpecificationImport() - оценка очереди без изменений\n *   startFullSpecificationImport()   - начать новую полную загрузку
  *   getFullSpecificationImportStatus() - проверить прогресс
  *   resumeFullSpecificationImport()  - возобновить после PAUSED/STOPPED
  *   stopFullSpecificationImport()    - остановить; результат сохранится
@@ -39,6 +39,22 @@ const SPEC_ALL_JOURNAL_HEADERS_ = [
   'Артикул', 'Ссылка на КД', 'Статус', 'Файл СП',
   'Строк состава', 'Колец', 'Комментарий', 'Проверено'
 ];
+
+/** Только оценить объём работ; не создаёт листов и триггеров. */
+function previewFullSpecificationImport() {
+  const ss = SpreadsheetApp.openById(SPEC_ALL_.spreadsheetId);
+  const source = ss.getSheetByName(SPEC_ALL_.catalogName);
+  if (!source) throw new Error('Не найден исходный каталог ссылок');
+  const snapshot = specAllBuildSnapshot_(source);
+  const result = {
+    candidates: snapshot.queue.length,
+    componentLinksExcluded: snapshot.componentLinksExcluded,
+    withoutFolderExcluded: snapshot.withoutFolderExcluded,
+    duplicateCatalogEntries: snapshot.duplicateCatalogEntries
+  };
+  Logger.log('SPEC_CATALOG_PREVIEW ' + JSON.stringify(result));
+  return result;
+}
 
 /** Создать снимок очереди и приступить к обработке первой порции. */
 function startFullSpecificationImport() {
@@ -384,7 +400,8 @@ function specAllReadArticle_(article, folderUrl) {
       comment: 'Слишком много строк в источнике; требуется ручная проверка' };
   }
   const matrix = selected.tab.getRange(1, 1,
-    Math.max(3, selected.tab.getLastRow()), 7).getDisplayValues();
+    Math.max(3, selected.tab.getLastRow()),
+    Math.min(7, selected.tab.getMaxColumns())).getDisplayValues();
   const parsed = specAllParse_(matrix, selected.header, article,
     file.getName(), file.getUrl(), folderUrl, selected.tab.getName());
   if (!parsed.length) return { status: 'INVALID_SOURCE', rows: [],
