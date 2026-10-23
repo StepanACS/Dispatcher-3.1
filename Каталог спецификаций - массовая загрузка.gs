@@ -114,7 +114,20 @@ function continueFullSpecificationImport() {
     const ss = SpreadsheetApp.openById(SPEC_ALL_.spreadsheetId);
     const stage = ss.getSheetByName(SPEC_ALL_.stagingName);
     const log = ss.getSheetByName(SPEC_ALL_.journalName);
-    if (!stage || !log) throw new Error('Не найдены рабочие листы импорта');
+    if (!log) throw new Error('Не найден журнал импорта');
+    // Завершение может быть прервано после переименования листа.
+    // В таком случае повторная попытка фиксирует готовность без пересборки.
+    if (!stage && state.cursor === state.total &&
+        ss.getSheetByName(SPEC_ALL_.finishedName)) {
+      state.status = state.warning > 0 || state.noSpec > 0
+        ? 'FINISHED_WITH_GAPS' : 'FINISHED';
+      state.finishedAt = new Date().toISOString();
+      specAllSaveState_(state);
+      specAllWriteStatus_(log, state);
+      specAllRemoveTriggers_();
+      return state;
+    }
+    if (!stage) throw new Error('Не найден лист загрузки');
 
     // Снимок очереди хранится в журнале: между запусками каталог может меняться.
     const remaining = state.total - state.cursor;
@@ -206,7 +219,11 @@ function continueFullSpecificationImport() {
     Logger.log('SPEC_CATALOG_FINISHED ' + JSON.stringify(state));
     return state;
   } catch (e) {
-    if (state && state.status === 'RUNNING') {
+    // Сбрасываем in-memory счётчики незаписанной порции: при возобновлении
+    // она будет обработана повторно, иначе статистика задвоится.
+    const durable = specAllLoadState_();
+    if (durable && durable.status === 'RUNNING') {
+      state = durable;
       state.status = 'PAUSED';
       state.lastError = String(e.message || e).slice(0, 600);
       state.updatedAt = new Date().toISOString();
