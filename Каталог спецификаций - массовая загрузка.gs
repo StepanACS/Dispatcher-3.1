@@ -7,7 +7,8 @@
  * папки КД. В "Архив" и другие вложенные каталоги НЕ заходим.
  *
  * Выполнить вручную:
- *   previewFullSpecificationImport() - оценка очереди без изменений\n *   startFullSpecificationImport()   - начать новую полную загрузку
+ *   previewFullSpecificationImport() - оценка очереди без изменений
+ *   startFullSpecificationImport()   - начать новую полную загрузку
  *   getFullSpecificationImportStatus() - проверить прогресс
  *   resumeFullSpecificationImport()  - возобновить после PAUSED/STOPPED
  *   stopFullSpecificationImport()    - остановить; результат сохранится
